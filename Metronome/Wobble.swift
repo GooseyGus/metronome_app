@@ -1,10 +1,10 @@
 import SwiftUI
 
 /// Easter egg: tapping the title makes every component shiver, like a coffee cup
-/// when something heavy walks past. Each tap adds a quick ripple that dies out fast.
-/// Keep tapping and components get knocked off the screen one by one; ten taps in a
-/// row clears everything, with the title last. Once tapping stops, fallen components
-/// drop back in from above.
+/// when something heavy walks past. Each tap adds a quick ripple that dies out fast,
+/// and also builds up a slower-fading level of shaking. As that builds, the least
+/// sturdy components get knocked off first; about ten quick taps clears everything,
+/// with the title last. Once tapping stops, fallen components drop back in from above.
 @Observable
 final class Wobble {
     private struct Traits {
@@ -13,8 +13,8 @@ final class Wobble {
         var phase: Double
         var spin: Double
         var returnDelay: Double
-        /// How many taps in a row knock this component off.
-        var fallsAtTap: Int
+        /// How much built-up shaking knocks this component off.
+        var sturdiness: Double
     }
 
     private struct Fall {
@@ -24,7 +24,7 @@ final class Wobble {
     }
 
     private(set) var isAnimating = false
-    /// Set once every component has been knocked off in one streak; swaps the
+    /// Set once every component has been knocked off in one go; swaps the
     /// running metronome for a dancer until RESET.
     private(set) var dancerUnlocked = false
     /// When the dancer touches down after its first fall, for its landing animation.
@@ -34,7 +34,6 @@ final class Wobble {
     private var taps: [Date] = []
     private var traits: [String: Traits] = [:]
     private var fallsLast: Set<String> = []
-    private var streak = 0
     private var falls: [String: Fall] = [:]
     private var animationTask: Task<Void, Never>?
 
@@ -43,9 +42,13 @@ final class Wobble {
     private let decay = 0.3
     private let degreesPerTap = 1.5
     private let maxDegrees = 6.0
-    /// Taps closer together than this count as one streak.
-    private let streakGap = 0.6
-    private let tapsToClearEverything = 10
+    /// How long built-up shaking takes to fade to about a third. Longer than the
+    /// visible ripple, so fast tapping builds up and slow tapping drains away.
+    private let buildUpDecay = 1.0
+    /// Ten taps about five a second build up to roughly 4.8, so the title (the
+    /// sturdiest) falls on about the tenth, once everything else has gone.
+    private let sturdinessRange = 1.7...4.25
+    private let titleSturdiness = 4.7
     /// Fallen components come back this long after the last tap.
     private let quietPeriod = 1.2
     private let minimumTimeAway = 0.8
@@ -61,7 +64,7 @@ final class Wobble {
         let now = Date()
         // Once things have settled, the next shake picks new strengths,
         // so it's not the same components falling first every time.
-        if level(at: now) < 0.02 && falls.isEmpty {
+        if buildUp(at: now) < 0.05 && falls.isEmpty {
             for id in traits.keys { traits[id] = randomTraits(for: id) }
         }
         // Lock in anything already dropping back, before this tap delays the rest.
@@ -70,17 +73,14 @@ final class Wobble {
             if start <= now { falls[id]?.returnStart = start }
         }
 
-        if let last = taps.last, now.timeIntervalSince(last) < streakGap {
-            streak += 1
-        } else {
-            streak = 1
-        }
-        taps = taps.filter { now.timeIntervalSince($0) < decay * 8 } + [now]
+        taps = taps.filter { now.timeIntervalSince($0) < buildUpDecay * 6 } + [now]
 
-        for (id, trait) in traits where falls[id] == nil && streak >= trait.fallsAtTap {
+        let shaking = buildUp(at: now)
+        for (id, trait) in traits where falls[id] == nil && shaking >= trait.sturdiness {
             falls[id] = Fall(start: now)
+            // The title is always the last to go, so it falling means everything has.
+            if fallsLast.contains(id) && !dancerUnlocked { dancerPending = true }
         }
-        if streak >= tapsToClearEverything && !dancerUnlocked { dancerPending = true }
         startAnimating()
     }
 
@@ -137,9 +137,9 @@ final class Wobble {
         }
     }
 
-    /// The shaking's peak level.
-    private func level(at date: Date) -> Double {
-        taps.reduce(0) { $0 + exp(-date.timeIntervalSince($1) / decay) }
+    /// How much shaking has built up: one per tap, fading slowly.
+    private func buildUp(at date: Date) -> Double {
+        taps.reduce(0) { $0 + exp(-date.timeIntervalSince($1) / buildUpDecay) }
     }
 
     private func returnStart(for id: String, fall: Fall) -> Date {
@@ -177,7 +177,7 @@ final class Wobble {
             phase: .random(in: 0...(2 * .pi)),
             spin: Bool.random() ? 1 : -1,
             returnDelay: .random(in: 0...0.5),
-            fallsAtTap: fallsLast.contains(id) ? tapsToClearEverything : .random(in: 3...(tapsToClearEverything - 1))
+            sturdiness: fallsLast.contains(id) ? titleSturdiness : .random(in: sturdinessRange)
         )
     }
 }
