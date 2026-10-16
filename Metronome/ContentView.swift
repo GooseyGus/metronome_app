@@ -30,8 +30,24 @@ struct ContentView: View {
     ]
     private let presets = [30, 60, 72, 90, 120, 140, 180, 240]
     private let gridSpacing: CGFloat = 8
-    private let tempoFontSize: CGFloat = 88
-    private let stepButtonSize: CGFloat = 80
+
+    /// Sizes that differ between portrait and the shorter landscape screen.
+    private struct Metrics {
+        var spacing: CGFloat = 16
+        var verticalPadding: CGFloat = 16
+        var presetHeight: CGFloat = 40
+        var soundHeight: CGFloat = 44
+        var tempoFontSize: CGFloat = 88
+        var bpmLabelSize: CGFloat = 22
+        var stepButtonSize: CGFloat = 80
+        var startStopFontSize: CGFloat = 64
+
+        static let portrait = Metrics()
+        static let landscape = Metrics(
+            spacing: 8, verticalPadding: 8, presetHeight: 30, soundHeight: 34,
+            tempoFontSize: 60, bpmLabelSize: 16, stepButtonSize: 56, startStopFontSize: 40
+        )
+    }
 
     private var palette: Palette { Palette.all[paletteIndex % Palette.all.count] }
 
@@ -48,35 +64,55 @@ struct ContentView: View {
 
     var body: some View {
         GeometryReader { geometry in
-            let contentWidth = geometry.size.width - 32
+            // Sideways, START/STOP moves to a column on the right and everything else shifts left.
+            let isLandscape = geometry.size.width > geometry.size.height
+            let m = isLandscape ? Metrics.landscape : .portrait
+            let fullWidth = geometry.size.width - 32
+            let startStopWidth = fullWidth / 4
+            let contentWidth = isLandscape ? fullWidth - startStopWidth - 16 : fullWidth
             // One column of a four-column grid (16pt gaps).
             let columnWidth = (contentWidth - 48) / 4
             // The preset grid takes two thirds; the right-hand third lines up above and below it.
             let leftWidth = (contentWidth - gridSpacing) * 2 / 3
 
-            VStack(spacing: 16) {
-                topRow(columnWidth: columnWidth)
-                    .frame(height: geometry.size.height / 16)
+            let controls = VStack(spacing: m.spacing) {
+                topRow(columnWidth: columnWidth, height: geometry.size.height / 16)
                 VStack(spacing: gridSpacing) {
                     timeSignatureRow(leftWidth: leftWidth, height: geometry.size.height / 12)
-                    presetRow(leftWidth: leftWidth)
+                    presetRow(leftWidth: leftWidth, tileHeight: m.presetHeight)
                 }
 
                 Spacer(minLength: 0)
 
-                tempoDisplay
+                tempoDisplay(m)
                 TempoSlider(value: $tempo, range: tempoRange, color: palette.text) { isSliding = $0 }
                     .wobbly("slider")
 
                 Spacer(minLength: 0)
 
                 soundRow
-                    .frame(height: 44)
-                startStopButton
-                    .frame(height: geometry.size.height / 4)
-                    .wobbly("startStop")
+                    .frame(height: m.soundHeight)
             }
-            .padding()
+
+            Group {
+                if isLandscape {
+                    HStack(spacing: 16) {
+                        controls
+                        startStopButton(fontSize: m.startStopFontSize)
+                            .frame(width: startStopWidth)
+                            .wobbly("startStop")
+                    }
+                } else {
+                    VStack(spacing: m.spacing) {
+                        controls
+                        startStopButton(fontSize: m.startStopFontSize)
+                            .frame(height: geometry.size.height / 4)
+                            .wobbly("startStop")
+                    }
+                }
+            }
+            .padding(.horizontal)
+            .padding(.vertical, m.verticalPadding)
         }
         .environment(wobble)
         .background(palette.background.ignoresSafeArea())
@@ -104,7 +140,7 @@ struct ContentView: View {
 
     // MARK: - Rows
 
-    private func topRow(columnWidth: CGFloat) -> some View {
+    private func topRow(columnWidth: CGFloat, height: CGFloat) -> some View {
         HStack {
             // Lit only when there's something to reset.
             tile("RESET", isOn: !isAtDefaults, action: resetAll)
@@ -115,11 +151,19 @@ struct ContentView: View {
 
             Spacer()
 
+            // While running, the title becomes a little metronome ticking in time.
             PressButton(action: wobble.tap) {
-                CapText(text: "METRONOME APP", size: 15, tracking: 3)
-                    .foregroundStyle(palette.text)
-                    .extraBold(palette.text, amount: 0.4)
-                    .padding(.vertical, 12)
+                Group {
+                    if isRunning {
+                        MetronomeGlyph(metronome: metronome, palette: palette)
+                            .frame(width: height * 0.9)
+                    } else {
+                        CapText(text: "METRONOME APP", size: 15, tracking: 3)
+                            .foregroundStyle(palette.text)
+                            .extraBold(palette.text, amount: 0.4)
+                    }
+                }
+                .frame(maxHeight: .infinity)
             }
             .wobbly("title", fallsLast: true)
 
@@ -139,6 +183,7 @@ struct ContentView: View {
             .accessibilityLabel("Change colour palette")
             .wobbly("palette")
         }
+        .frame(height: height)
     }
 
     /// The time signature above the presets, and its on/off toggle above tap tempo.
@@ -183,7 +228,7 @@ struct ContentView: View {
     }
 
     /// Presets in two rows of four (two thirds), and tap tempo (one third).
-    private func presetRow(leftWidth: CGFloat) -> some View {
+    private func presetRow(leftWidth: CGFloat, tileHeight: CGFloat) -> some View {
         let columns = Array(repeating: GridItem(.flexible(), spacing: gridSpacing), count: 4)
 
         return HStack(spacing: gridSpacing) {
@@ -191,7 +236,7 @@ struct ContentView: View {
                 ForEach(presets, id: \.self) { preset in
                     // Not lit mid-drag, so presets don't flash as the slider passes them.
                     tile(String(preset), isOn: !isSliding && tempo == preset) { tempo = preset }
-                        .frame(height: 40)
+                        .frame(height: tileHeight)
                         .wobbly("preset\(preset)")
                 }
             }
@@ -200,20 +245,20 @@ struct ContentView: View {
             tile("TAP TO SET", isOn: false, fontSize: 18, action: tapTempo)
                 .wobbly("tap")
         }
-        .frame(height: 40 * 2 + gridSpacing)
+        .frame(height: tileHeight * 2 + gridSpacing)
     }
 
-    private var tempoDisplay: some View {
+    private func tempoDisplay(_ m: Metrics) -> some View {
         VStack(spacing: 4) {
             HStack {
-                stepButton(systemImage: "minus", by: -1)
+                stepButton(systemImage: "minus", by: -1, size: m.stepButtonSize)
                     .wobbly("minus")
 
                 Spacer()
 
                 PressButton(action: { editingField = .tempo }) {
                     // Fixed three-digit width, so any tempo sits centred and the layout never shifts.
-                    CapText(text: String(tempo), size: tempoFontSize, widthOf: "888")
+                    CapText(text: String(tempo), size: m.tempoFontSize, widthOf: "888")
                         .padding(.horizontal, 12)
                         .padding(.vertical, 14)
                         .editableHighlight(palette.text)
@@ -223,12 +268,12 @@ struct ContentView: View {
 
                 Spacer()
 
-                stepButton(systemImage: "plus", by: 1)
+                stepButton(systemImage: "plus", by: 1, size: m.stepButtonSize)
                     .wobbly("plus")
             }
 
             Text("BPM")
-                .font(.analogue(size: 22))
+                .font(.analogue(size: m.bpmLabelSize))
                 .tracking(4)
                 .wobbly("bpm")
         }
@@ -246,13 +291,13 @@ struct ContentView: View {
         }
     }
 
-    private var startStopButton: some View {
+    private func startStopButton(fontSize: CGFloat) -> some View {
         PressButton(action: toggleRunning) {
             RoundedRectangle(cornerRadius: 12)
                 .fill(isRunning ? palette.stop : palette.start)
                 .overlay {
                     let color = isRunning ? palette.stopText : palette.startText
-                    CapText(text: isRunning ? "STOP" : "START", size: 64, tracking: 6)
+                    CapText(text: isRunning ? "STOP" : "START", size: fontSize, tracking: 6)
                         .foregroundStyle(color)
                         .extraBold(color, amount: 1.2)
                 }
@@ -270,13 +315,14 @@ struct ContentView: View {
         case .beats:
             Keypad(
                 title: "BEATS PER BAR", value: beatsPerBar, range: beatsRange, palette: palette,
-                onCommit: { beatsPerBar = $0; editingField = nil },
+                // Confirming either number switches the time signature on.
+                onCommit: { beatsPerBar = $0; accentEnabled = true; editingField = nil },
                 onCancel: { editingField = nil }
             )
         case .beatUnit:
             ChoicePad(
                 title: "NOTE VALUE", options: beatUnits, selected: beatUnit, palette: palette,
-                onSelect: { beatUnit = $0; editingField = nil },
+                onSelect: { beatUnit = $0; accentEnabled = true; editingField = nil },
                 onCancel: { editingField = nil }
             )
         case nil:
@@ -301,14 +347,14 @@ struct ContentView: View {
         .accessibilityAddTraits(isOn ? .isSelected : [])
     }
 
-    private func stepButton(systemImage: String, by delta: Int) -> some View {
+    private func stepButton(systemImage: String, by delta: Int, size: CGFloat) -> some View {
         PressButton(repeats: true, action: { step(by: delta) }) {
             Circle()
                 .fill(palette.control)
-                .frame(width: stepButtonSize, height: stepButtonSize)
+                .frame(width: size, height: size)
                 .overlay {
                     Image(systemName: systemImage)
-                        .font(.system(size: 32, weight: .bold))
+                        .font(.system(size: size * 0.4, weight: .bold))
                         .foregroundStyle(palette.controlText)
                 }
         }

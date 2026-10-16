@@ -77,11 +77,9 @@ struct Keypad: View {
                 entry = String(entry.dropLast())
             }
         case .ok:
-            if !isValueSelected, let typed = Int(entry) {
-                onCommit(min(max(typed, range.lowerBound), range.upperBound))
-            } else {
-                onCancel()
-            }
+            // OK always confirms, keeping the current value if nothing new was typed.
+            let typed = isValueSelected ? value : Int(entry) ?? value
+            onCommit(min(max(typed, range.lowerBound), range.upperBound))
         }
     }
 
