@@ -10,3 +10,7 @@ build/
 
 # macOS
 .DS_Store
+
+# VS Code
+.vscode/
+metronome_app.code-workspace
