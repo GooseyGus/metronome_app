@@ -139,31 +139,46 @@ struct PopupCard<Content: View>: View {
     let palette: Palette
     let onDismiss: () -> Void
     @ViewBuilder let content: Content
+    @Environment(\.uiScale) private var scale
+    @State private var cardHeight: CGFloat = 0
 
     var body: some View {
-        ZStack {
-            Color.black.opacity(0.45)
-                .ignoresSafeArea()
-                .onTapGesture(perform: onDismiss)
+        GeometryReader { geometry in
+            ZStack {
+                Color.black.opacity(0.45)
+                    .ignoresSafeArea()
+                    .onTapGesture(perform: onDismiss)
 
-            VStack(spacing: 16) {
-                VStack(spacing: 4) {
-                    Text(title)
-                        .font(.analogue(size: 16))
-                        .tracking(3)
-                    if let subtitle {
-                        Text(subtitle)
-                            .font(.analogue(size: 13))
-                            .opacity(0.6)
+                VStack(spacing: 16) {
+                    VStack(spacing: 4) {
+                        Text(title)
+                            .font(.analogue(size: 16))
+                            .tracking(3)
+                        if let subtitle {
+                            Text(subtitle)
+                                .font(.analogue(size: 13))
+                                .opacity(0.6)
+                        }
                     }
+                    content
                 }
-                content
+                .padding(20)
+                .frame(width: 300)
+                .fixedSize(horizontal: false, vertical: true)
+                .foregroundStyle(palette.text)
+                .background(RoundedRectangle(cornerRadius: 20).fill(palette.background))
+                .overlay(RoundedRectangle(cornerRadius: 20).strokeBorder(palette.text.opacity(0.3)))
+                .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { cardHeight = $0 }
+                .scaleEffect(fitScale(availableHeight: geometry.size.height))
             }
-            .padding(20)
-            .frame(width: 300)
-            .foregroundStyle(palette.text)
-            .background(RoundedRectangle(cornerRadius: 20).fill(palette.background))
-            .overlay(RoundedRectangle(cornerRadius: 20).strokeBorder(palette.text.opacity(0.3)))
+            .frame(width: geometry.size.width, height: geometry.size.height)
         }
+    }
+
+    /// Bigger on iPad, and shrunk if needed to fit short screens like a phone on its side.
+    private func fitScale(availableHeight: CGFloat) -> CGFloat {
+        let preferred = min(scale, 1.5)
+        guard cardHeight > 0 else { return preferred }
+        return min(preferred, (availableHeight - 16) / cardHeight)
     }
 }

@@ -10,6 +10,11 @@ struct ContentView: View {
     @State private var editingField: Field?
     @State private var tapTimes: [Date] = []
     @State private var isSliding = false
+    @State private var dancerMove = 0
+    @State private var movesDanced: Set<Int> = []
+    @State private var lastMoveDanced: Int?
+    @State private var partnerLandingTime: Date?
+    @Environment(\.scenePhase) private var scenePhase
     // The palette is the only setting remembered between launches.
     @AppStorage("paletteIndex") private var paletteIndex = 0
     @State private var sound = ClickSound.classic
@@ -31,7 +36,7 @@ struct ContentView: View {
     private let presets = [30, 60, 72, 90, 120, 140, 180, 240]
     private let gridSpacing: CGFloat = 8
 
-    /// Sizes that differ between portrait and the shorter landscape screen.
+    /// Sizes that differ between portrait, the shorter iPhone landscape screen, and iPad.
     private struct Metrics {
         var spacing: CGFloat = 16
         var verticalPadding: CGFloat = 16
@@ -41,19 +46,38 @@ struct ContentView: View {
         var bpmLabelSize: CGFloat = 22
         var stepButtonSize: CGFloat = 80
         var startStopFontSize: CGFloat = 64
+        var titleFontSize: CGFloat = 15
+        var scale: CGFloat = 1
 
         static let portrait = Metrics()
         static let landscape = Metrics(
             spacing: 8, verticalPadding: 8, presetHeight: 30, soundHeight: 34,
             tempoFontSize: 60, bpmLabelSize: 16, stepButtonSize: 56, startStopFontSize: 40
         )
+
+        static func forSize(_ size: CGSize) -> Metrics {
+            // Only a phone on its side is short enough to need the compact sizes.
+            if size.height < 500 { return landscape }
+            // Bigger screens (iPad) scale everything up, relative to an iPhone, as far as
+            // the height allows. Landscape needs less height, as START/STOP moves to the side.
+            let heightAtNormalSize: CGFloat = size.width > size.height ? 520 : 760
+            let fit = min(size.width / 393, size.height / heightAtNormalSize)
+            let scale = min(max(fit, 1), 1.8)
+            return Metrics(
+                spacing: 16 * scale, verticalPadding: 16 * scale,
+                presetHeight: 40 * scale, soundHeight: 44 * scale,
+                tempoFontSize: 88 * scale, bpmLabelSize: 22 * scale,
+                stepButtonSize: 80 * scale, startStopFontSize: 64 * scale,
+                titleFontSize: 15 * scale, scale: scale
+            )
+        }
     }
 
     private var palette: Palette { Palette.all[paletteIndex % Palette.all.count] }
 
     private var isAtDefaults: Bool {
         tempo == Self.defaultTempo && beatsPerBar == Self.defaultBeats
-            && beatUnit == Self.defaultBeatUnit && !accentEnabled
+            && beatUnit == Self.defaultBeatUnit && !accentEnabled && !wobble.dancerUnlocked
     }
 
     /// BPM counts quarter notes. With the time signature on, it clicks on every
@@ -66,7 +90,7 @@ struct ContentView: View {
         GeometryReader { geometry in
             // Sideways, START/STOP moves to a column on the right and everything else shifts left.
             let isLandscape = geometry.size.width > geometry.size.height
-            let m = isLandscape ? Metrics.landscape : .portrait
+            let m = Metrics.forSize(geometry.size)
             let fullWidth = geometry.size.width - 32
             let startStopWidth = fullWidth / 4
             let contentWidth = isLandscape ? fullWidth - startStopWidth - 16 : fullWidth
@@ -76,7 +100,7 @@ struct ContentView: View {
             let leftWidth = (contentWidth - gridSpacing) * 2 / 3
 
             let controls = VStack(spacing: m.spacing) {
-                topRow(columnWidth: columnWidth, height: geometry.size.height / 16)
+                topRow(columnWidth: columnWidth, height: geometry.size.height / 16, titleSize: m.titleFontSize)
                 VStack(spacing: gridSpacing) {
                     timeSignatureRow(leftWidth: leftWidth, height: geometry.size.height / 12)
                     presetRow(leftWidth: leftWidth, tileHeight: m.presetHeight)
@@ -94,32 +118,38 @@ struct ContentView: View {
                     .frame(height: m.soundHeight)
             }
 
-            Group {
-                if isLandscape {
-                    HStack(spacing: 16) {
-                        controls
-                        startStopButton(fontSize: m.startStopFontSize)
-                            .frame(width: startStopWidth)
-                            .wobbly("startStop")
-                    }
-                } else {
-                    VStack(spacing: m.spacing) {
-                        controls
-                        startStopButton(fontSize: m.startStopFontSize)
-                            .frame(height: geometry.size.height / 4)
-                            .wobbly("startStop")
+            ZStack {
+                Group {
+                    if isLandscape {
+                        HStack(spacing: 16) {
+                            controls
+                            // Shrink the label if needed so it fits the narrower column.
+                            startStopButton(fontSize: min(m.startStopFontSize, startStopWidth * 0.2))
+                                .frame(width: startStopWidth)
+                                .wobbly("startStop")
+                        }
+                    } else {
+                        VStack(spacing: m.spacing) {
+                            controls
+                            startStopButton(fontSize: m.startStopFontSize)
+                                .frame(height: geometry.size.height / 4)
+                                .wobbly("startStop")
+                        }
                     }
                 }
+                .padding(.horizontal)
+                .padding(.vertical, m.verticalPadding)
+
+                popup
             }
-            .padding(.horizontal)
-            .padding(.vertical, m.verticalPadding)
+            .environment(\.uiScale, m.scale)
         }
         .environment(wobble)
         .background(palette.background.ignoresSafeArea())
-        .overlay { popup }
         .preferredColorScheme(palette.scheme)
         .transaction { $0.animation = nil }
         .onAppear {
+            metronome.onInterruption = { isRunning = false }
             metronome.setSound(sound)
             metronome.setBar(beats: beatsPerBar, accented: accentEnabled)
             metronome.setRate(clicksPerMinute)
@@ -136,11 +166,15 @@ struct ContentView: View {
         .onChange(of: sound) {
             metronome.setSound(sound)
         }
+        .onChange(of: scenePhase) {
+            // Keep playing in the background if running; otherwise let the app sleep.
+            if scenePhase == .background { metronome.pauseIfIdle() }
+        }
     }
 
     // MARK: - Rows
 
-    private func topRow(columnWidth: CGFloat, height: CGFloat) -> some View {
+    private func topRow(columnWidth: CGFloat, height: CGFloat, titleSize: CGFloat) -> some View {
         HStack {
             // Lit only when there's something to reset.
             tile("RESET", isOn: !isAtDefaults, action: resetAll)
@@ -152,13 +186,29 @@ struct ContentView: View {
             Spacer()
 
             // While running, the title becomes a little metronome ticking in time.
-            PressButton(action: wobble.tap) {
+            // Tapping the dancer changes its move instead of shaking everything.
+            PressButton(action: {
+                if isRunning && wobble.dancerUnlocked {
+                    dancerMove = (dancerMove + 1) % DancerGlyph.moveCount
+                } else {
+                    wobble.tap()
+                }
+            }) {
                 Group {
-                    if isRunning {
+                    // Once unlocked, the dancer replaces the title too, idling until START.
+                    if wobble.dancerUnlocked {
+                        DancerGlyph(
+                            metronome: metronome, palette: palette, isPlaying: isRunning,
+                            landingTime: wobble.dancerLandingTime,
+                            beatsPerBar: accentEnabled ? beatsPerBar : nil, moveOffset: dancerMove,
+                            partnerLandingTime: partnerLandingTime, onMove: noteMoveDanced
+                        )
+                        .frame(width: height * DancerGlyph.aspectRatio(withPartner: partnerLandingTime != nil))
+                    } else if isRunning {
                         MetronomeGlyph(metronome: metronome, palette: palette)
                             .frame(width: height * 0.9)
                     } else {
-                        CapText(text: "METRONOME APP", size: 15, tracking: 3)
+                        CapText(text: "METRONOME APP", size: titleSize, tracking: 3)
                             .foregroundStyle(palette.text)
                             .extraBold(palette.text, amount: 0.4)
                     }
@@ -340,7 +390,7 @@ struct ContentView: View {
             RoundedRectangle(cornerRadius: 12)
                 .fill(isOn ? palette.start : palette.control)
                 .overlay {
-                    CapText(text: title, size: fontSize, tracking: 1)
+                    TileLabel(text: title, size: fontSize)
                         .foregroundStyle(isOn ? palette.startText : palette.controlText)
                 }
         }
@@ -368,6 +418,7 @@ struct ContentView: View {
             metronome.stop()
             isRunning = false
         } else {
+            if wobble.dancerUnlocked { pickNewDance() }
             do {
                 try metronome.start(clicksPerMinute: clicksPerMinute)
                 isRunning = true
@@ -386,6 +437,28 @@ struct ContentView: View {
         beatsPerBar = Self.defaultBeats
         beatUnit = Self.defaultBeatUnit
         accentEnabled = false
+        wobble.resetDancer()
+        dancerMove = 0
+        movesDanced = []
+        lastMoveDanced = nil
+        partnerLandingTime = nil
+    }
+
+    /// Each START opens with a random dance, never the one they were just doing.
+    /// The bar count restarts at START, so the opening move is the offset itself.
+    private func pickNewDance() {
+        let choices = (0..<DancerGlyph.moveCount).filter { $0 != lastMoveDanced }
+        dancerMove = choices.randomElement() ?? 0
+    }
+
+    /// Once every move has been danced, a partner drops in to join.
+    private func noteMoveDanced(_ move: Int) {
+        lastMoveDanced = move
+        guard partnerLandingTime == nil else { return }
+        movesDanced.insert(move)
+        if movesDanced.count == DancerGlyph.moveCount {
+            partnerLandingTime = Date().addingTimeInterval(DancerGlyph.partnerDropDuration)
+        }
     }
 
     private func nextPalette() {
@@ -408,6 +481,17 @@ struct ContentView: View {
 
     private func clamped(_ value: Int, to range: ClosedRange<Int>) -> Int {
         min(max(value, range.lowerBound), range.upperBound)
+    }
+}
+
+/// A tile's label, drawn bigger on larger screens.
+private struct TileLabel: View {
+    let text: String
+    let size: CGFloat
+    @Environment(\.uiScale) private var scale
+
+    var body: some View {
+        CapText(text: text, size: size * scale, tracking: scale)
     }
 }
 

@@ -49,6 +49,11 @@ struct PressButton<Label: View>: View {
     }
 }
 
+extension EnvironmentValues {
+    /// How much bigger than iPhone size to draw controls: 1 on iPhone, up to 1.8 on iPad.
+    @Entry var uiScale: CGFloat = 1
+}
+
 /// A slider that tracks the finger exactly and stops the moment you let go (no momentum).
 struct TempoSlider: View {
     @Binding var value: Int
@@ -58,7 +63,8 @@ struct TempoSlider: View {
     var onEditingChanged: (Bool) -> Void = { _ in }
 
     @State private var isDragging = false
-    private let thumbSize: CGFloat = 28
+    @Environment(\.uiScale) private var scale
+    private var thumbSize: CGFloat { 28 * scale }
 
     var body: some View {
         GeometryReader { geometry in
@@ -67,8 +73,8 @@ struct TempoSlider: View {
             let fraction = CGFloat(value - range.lowerBound) / span
 
             ZStack(alignment: .leading) {
-                Capsule().fill(color.opacity(0.25)).frame(height: 6)
-                Capsule().fill(color).frame(width: thumbSize / 2 + travel * fraction, height: 6)
+                Capsule().fill(color.opacity(0.25)).frame(height: 6 * scale)
+                Capsule().fill(color).frame(width: thumbSize / 2 + travel * fraction, height: 6 * scale)
                 Circle().fill(color).frame(width: thumbSize, height: thumbSize).offset(x: travel * fraction)
             }
             .frame(maxHeight: .infinity)
@@ -89,7 +95,7 @@ struct TempoSlider: View {
                     }
             )
         }
-        .frame(height: 44)
+        .frame(height: 44 * scale)
         .accessibilityRepresentation {
             Slider(
                 value: Binding(get: { Double(value) }, set: { value = Int($0) }),

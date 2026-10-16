@@ -8,6 +8,10 @@ final class Metronome {
     private let engine = AVAudioEngine()
     private let generator: ClickGenerator
     private let source: AVAudioSourceNode
+    private var observers: [NSObjectProtocol] = []
+
+    /// Called when something else (like a phone call) stops the click.
+    var onInterruption: () -> Void = {}
 
     init() {
         // .playback keeps the click audible even with the silent switch on.
@@ -24,6 +28,28 @@ final class Metronome {
         source = AVAudioSourceNode(format: format, renderBlock: generator.makeRenderBlock())
         engine.attach(source)
         try? engine.connectNode(source, to: engine.mainMixerNode, format: format)
+
+        let center = NotificationCenter.default
+        // A phone call, alarm or Siri takes over the audio: stop and let the UI know.
+        observers.append(center.addObserver(forName: AVAudioSession.didBecomeInactiveNotification, object: session, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.stop()
+                self?.onInterruption()
+            }
+        })
+        // Plugging in or removing headphones stops the engine; restart it if we were playing.
+        observers.append(center.addObserver(forName: .AVAudioEngineConfigurationChange, object: engine, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self, self.generator.isActive else { return }
+                try? self.engine.start()
+            }
+        })
+    }
+
+    /// Stops the silent engine while nothing's playing, e.g. in the background,
+    /// so the app isn't kept awake. START restarts it.
+    func pauseIfIdle() {
+        if !generator.isActive { engine.pause() }
     }
 
     func start(clicksPerMinute: Double) throws {
@@ -55,8 +81,14 @@ final class Metronome {
     }
 
     /// With `accented`, the first of every `beats` clicks is pitched up.
+    /// The next click starts a fresh bar.
     func setBar(beats: Int, accented: Bool) {
         generator.setBar(beats: beats, accented: accented)
+    }
+
+    /// Which bar a beat (from `beatPhase`) falls in, matching the accented downbeats.
+    func bar(containingBeat beat: Int) -> Int {
+        generator.bar(containingBeat: beat)
     }
 }
 
@@ -73,12 +105,17 @@ nonisolated final class ClickGenerator: @unchecked Sendable {
     private let isAccented = Atomic<Bool>(false)
     private let isPlaying = Atomic<Bool>(false)
     private let restartRequested = Atomic<Bool>(false)
+    private let barRestartRequested = Atomic<Bool>(false)
+    // The latest downbeat: which beat it fell on, and how many bars had started by then.
+    private let latestDownbeat = Atomic<Int>(0)
+    private let barsStarted = Atomic<Int>(0)
     // Where the beat was at the start of the latest buffer, and when that buffer plays.
     private let phaseBits = Atomic<UInt64>(0)
     private let phaseHostTime = Atomic<UInt64>(0)
     private var framesSinceBeat = 0
     private var beatInBar = 0
     private var beatsSinceStart = 0
+    private var barsSinceStart = 0
 
     init(sampleRate: Double) {
         self.sampleRate = sampleRate
@@ -97,6 +134,16 @@ nonisolated final class ClickGenerator: @unchecked Sendable {
     func setBar(beats: Int, accented: Bool) {
         beatsPerBar.store(beats, ordering: .relaxed)
         isAccented.store(accented, ordering: .relaxed)
+        barRestartRequested.store(true, ordering: .releasing)
+    }
+
+    func bar(containingBeat beat: Int) -> Int {
+        let downbeat = latestDownbeat.load(ordering: .acquiring)
+        let bars = barsStarted.load(ordering: .relaxed)
+        let beats = max(beatsPerBar.load(ordering: .relaxed), 1)
+        // Counts back as well as forward, as the audio is rendered slightly ahead of being heard.
+        let offset = Double(beat - downbeat) / Double(beats)
+        return bars + Int(offset.rounded(.down))
     }
 
     func start() {
@@ -107,6 +154,10 @@ nonisolated final class ClickGenerator: @unchecked Sendable {
 
     func stop() {
         isPlaying.store(false, ordering: .releasing)
+    }
+
+    var isActive: Bool {
+        isPlaying.load(ordering: .acquiring)
     }
 
     func beatPhase(atSeconds seconds: Double) -> Double? {
@@ -138,6 +189,10 @@ nonisolated final class ClickGenerator: @unchecked Sendable {
             framesSinceBeat = 0
             beatInBar = 0
             beatsSinceStart = 0
+            barsSinceStart = 0
+            barRestartRequested.store(false, ordering: .relaxed)
+            barsStarted.store(0, ordering: .relaxed)
+            latestDownbeat.store(0, ordering: .releasing)
         }
         let beatLength = samplesPerBeat.load(ordering: .relaxed)
 
@@ -151,10 +206,20 @@ nonisolated final class ClickGenerator: @unchecked Sendable {
         for i in 0..<frameCount {
             if framesSinceBeat >= beatLength {
                 framesSinceBeat = 0
-                beatInBar += 1
                 beatsSinceStart += 1
+                // A changed time signature starts a fresh bar on this click.
+                if barRestartRequested.exchange(false, ordering: .acquiring) {
+                    beatInBar = 0
+                } else {
+                    beatInBar += 1
+                    if beatInBar >= beats { beatInBar = 0 }
+                }
+                if beatInBar == 0 {
+                    barsSinceStart += 1
+                    barsStarted.store(barsSinceStart, ordering: .relaxed)
+                    latestDownbeat.store(beatsSinceStart, ordering: .releasing)
+                }
             }
-            if beatInBar >= beats { beatInBar = 0 }
             let click = accented && beatInBar == 0 ? accentClicks[sound] : clicks[sound]
             out[i] = framesSinceBeat < click.count ? click[framesSinceBeat] : 0
             framesSinceBeat += 1

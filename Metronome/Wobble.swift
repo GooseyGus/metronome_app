@@ -24,6 +24,13 @@ final class Wobble {
     }
 
     private(set) var isAnimating = false
+    /// Set once every component has been knocked off in one streak; swaps the
+    /// running metronome for a dancer until RESET.
+    private(set) var dancerUnlocked = false
+    /// When the dancer touches down after its first fall, for its landing animation.
+    private(set) var dancerLandingTime: Date?
+    /// Everything's been cleared, but the title is still on its way off the screen.
+    private var dancerPending = false
     private var taps: [Date] = []
     private var traits: [String: Traits] = [:]
     private var fallsLast: Set<String> = []
@@ -73,7 +80,24 @@ final class Wobble {
         for (id, trait) in traits where falls[id] == nil && streak >= trait.fallsAtTap {
             falls[id] = Fall(start: now)
         }
+        if streak >= tapsToClearEverything && !dancerUnlocked { dancerPending = true }
         startAnimating()
+    }
+
+    func resetDancer() {
+        dancerUnlocked = false
+        dancerPending = false
+        dancerLandingTime = nil
+    }
+
+    /// Swaps in the dancer only once the title has left the screen and starts dropping back.
+    private func revealDancerIfReturning(at now: Date) {
+        guard let id = fallsLast.first else { return }
+        let start = falls[id].map { returnStart(for: id, fall: $0) } ?? now
+        guard start <= now else { return }
+        dancerPending = false
+        dancerUnlocked = true
+        dancerLandingTime = start.addingTimeInterval(dropDuration)
     }
 
     /// Rotation (degrees) and offset for a component at a moment in time.
@@ -91,7 +115,7 @@ final class Wobble {
             if elapsed < dropDuration {
                 // Fall back in from above the screen, accelerating like it's dropped.
                 let progress = elapsed / dropDuration
-                return (0, 0, -1_200 * (1 - progress * progress))
+                return (0, 0, -2_000 * (1 - progress * progress))
             }
             // A small shiver on landing.
             let landed = elapsed - dropDuration
@@ -131,8 +155,9 @@ final class Wobble {
         guard animationTask == nil else { return }
         animationTask = Task {
             while true {
-                try? await Task.sleep(for: .milliseconds(250))
+                try? await Task.sleep(for: .milliseconds(100))
                 let now = Date()
+                if dancerPending { revealDancerIfReturning(at: now) }
                 let settled = dropDuration + settleDuration
                 falls = falls.filter { id, fall in
                     now.timeIntervalSince(returnStart(for: id, fall: fall)) < settled
