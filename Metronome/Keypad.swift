@@ -6,6 +6,8 @@ struct Keypad: View {
     let title: String
     let value: Int
     let range: ClosedRange<Int>
+    /// When set, the value is shown as the top of a time signature over this.
+    var denominator: Int?
     let palette: Palette
     let onCommit: (Int) -> Void
     let onCancel: () -> Void
@@ -20,17 +22,22 @@ struct Keypad: View {
 
     var body: some View {
         PopupCard(title: title, subtitle: "\(range.lowerBound)–\(range.upperBound)", palette: palette, onDismiss: onCancel) {
-            CapText(
+            let field = CapText(
                 text: isValueSelected ? String(value) : entry,
-                size: 56,
+                size: denominator == nil ? 56 : 40,
                 widthOf: String(repeating: "8", count: maxDigits)
             )
-            .padding(12)
+            .padding(denominator == nil ? 12 : 8)
             .foregroundStyle(isValueSelected ? palette.startText : palette.text)
             .background(
                 RoundedRectangle(cornerRadius: 10)
                     .fill(isValueSelected ? palette.start : palette.text.opacity(0.12))
             )
+            if let denominator {
+                TimeSignature(top: field, bottom: FractionPart(value: denominator), palette: palette)
+            } else {
+                field
+            }
 
             LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 10), count: 3), spacing: 10) {
                 ForEach(keys, id: \.self, content: keyButton)
@@ -102,12 +109,24 @@ struct ChoicePad: View {
     let title: String
     let options: [Option]
     let selected: Int
+    /// When set, the choice is shown as the bottom of a time signature under this.
+    var numerator: Int?
     let palette: Palette
     let onSelect: (Int) -> Void
     let onCancel: () -> Void
 
     var body: some View {
         PopupCard(title: title, subtitle: nil, palette: palette, onDismiss: onCancel) {
+            if let numerator {
+                TimeSignature(
+                    top: FractionPart(value: numerator),
+                    bottom: CapText(text: String(selected), size: 40, widthOf: "88")
+                        .padding(8)
+                        .foregroundStyle(palette.startText)
+                        .background(RoundedRectangle(cornerRadius: 10).fill(palette.start)),
+                    palette: palette
+                )
+            }
             LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 10), count: 4), spacing: 10) {
                 ForEach(options, id: \.value) { option in
                     let isSelected = option.value == selected
@@ -116,11 +135,8 @@ struct ChoicePad: View {
                             .fill(isSelected ? palette.start : palette.control)
                             .frame(height: 64)
                             .overlay {
-                                VStack(spacing: 8) {
-                                    CapText(text: String(option.value), size: 26)
-                                    CapText(text: option.name.uppercased(), size: 9, tracking: 1)
-                                }
-                                .foregroundStyle(isSelected ? palette.startText : palette.controlText)
+                                CapText(text: String(option.value), size: 26)
+                                    .foregroundStyle(isSelected ? palette.startText : palette.controlText)
                             }
                     }
                     .accessibilityLabel("\(option.value), \(option.name)")
@@ -128,6 +144,33 @@ struct ChoicePad: View {
                 }
             }
         }
+    }
+}
+
+/// A time signature stacked as it's written on the stave, one number over the other,
+/// so the number being changed can be seen in place.
+private struct TimeSignature<Top: View, Bottom: View>: View {
+    let top: Top
+    let bottom: Bottom
+    let palette: Palette
+
+    var body: some View {
+        VStack(spacing: 6) {
+            top
+            Capsule().fill(palette.text.opacity(0.3)).frame(width: 64, height: 2)
+            bottom
+        }
+    }
+}
+
+/// The other half of the time signature, shown but not being changed.
+private struct FractionPart: View {
+    let value: Int
+
+    var body: some View {
+        CapText(text: String(value), size: 40, widthOf: "88")
+            .padding(8)
+            .opacity(0.5)
     }
 }
 

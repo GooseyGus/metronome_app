@@ -564,14 +564,14 @@ struct ContentView: View {
             )
         case .beats:
             Keypad(
-                title: "BEATS PER BAR", value: beatsPerBar, range: beatsRange, palette: palette,
+                title: "BEATS PER BAR", value: beatsPerBar, range: beatsRange, denominator: beatUnit, palette: palette,
                 // Confirming either number switches the time signature on.
                 onCommit: { beatsPerBar = $0; accentEnabled = accentAvailable; editingField = nil },
                 onCancel: { editingField = nil }
             )
         case .beatUnit:
             ChoicePad(
-                title: "NOTE VALUE", options: beatUnits, selected: beatUnit, palette: palette,
+                title: "NOTE VALUE", options: beatUnits, selected: beatUnit, numerator: beatsPerBar, palette: palette,
                 onSelect: { beatUnit = $0; accentEnabled = accentAvailable; editingField = nil },
                 onCancel: { editingField = nil }
             )
