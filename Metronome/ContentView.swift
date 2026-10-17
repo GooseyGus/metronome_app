@@ -2,8 +2,8 @@ import SwiftUI
 
 struct ContentView: View {
     private enum Field { case tempo, beats, beatUnit }
+    private enum ImportProblem { case full, unreadable }
 
-    @State private var tempo = defaultTempo
     @State private var isRunning = false
     @State private var metronome = Metronome()
     @State private var wobble = Wobble()
@@ -14,13 +14,27 @@ struct ContentView: View {
     @State private var movesDanced: Set<Int> = []
     @State private var lastMoveDanced: Int?
     @State private var partnerLandingTime: Date?
+    @State private var customSounds = CustomSounds()
+    @State private var isRecordingSound = false
+    /// Holding a recorded sound makes them all wiggle, ready to delete.
+    @State private var isEditingSounds = false
+    @State private var editingSoundsSince = Date.distantPast
+    /// How much to enlarge pop-ups, matching the controls (bigger on iPad).
+    @State private var popupScale: CGFloat = 1
+    @State private var soundToEdit: CustomSound?
+    /// A shared sound that's been opened, waiting to be imported.
+    @State private var soundToImport: SharedSound?
+    @State private var importProblem: ImportProblem?
+    /// Set to scroll the sound row, e.g. to a newly recorded sound.
+    @State private var soundRowTarget: String?
     @Environment(\.scenePhase) private var scenePhase
-    // The palette is the only setting remembered between launches.
+    // Settings remembered between launches.
+    @AppStorage("tempo") private var tempo = defaultTempo
     @AppStorage("paletteIndex") private var paletteIndex = 0
-    @State private var sound = ClickSound.classic
-    @State private var accentEnabled = false
-    @State private var beatsPerBar = defaultBeats
-    @State private var beatUnit = defaultBeatUnit
+    @AppStorage("soundChoice") private var soundChoice = SoundChoice.builtIn(.classic)
+    @AppStorage("accentEnabled") private var accentEnabled = false
+    @AppStorage("beatsPerBar") private var beatsPerBar = defaultBeats
+    @AppStorage("beatUnit") private var beatUnit = defaultBeatUnit
 
     private static let defaultTempo = 120
     private static let defaultBeats = 4
@@ -114,11 +128,19 @@ struct ContentView: View {
 
                 Spacer(minLength: 0)
 
-                soundRow
+                soundRow(width: contentWidth)
                     .frame(height: m.soundHeight)
             }
 
             ZStack {
+                // While sounds wiggle, tapping any empty space stops them.
+                if isEditingSounds {
+                    Color.clear
+                        .contentShape(Rectangle())
+                        .ignoresSafeArea()
+                        .onTapGesture { isEditingSounds = false }
+                }
+
                 Group {
                     if isLandscape {
                         HStack(spacing: 16) {
@@ -139,18 +161,27 @@ struct ContentView: View {
                 }
                 .padding(.horizontal)
                 .padding(.vertical, m.verticalPadding)
-
-                popup
             }
             .environment(\.uiScale, m.scale)
+            .onChange(of: m.scale, initial: true) { popupScale = m.scale }
         }
+        // While sounds wiggle, any tap (buttons included) stops them.
+        .simultaneousGesture(TapGesture().onEnded {
+            if isEditingSounds && Date().timeIntervalSince(editingSoundsSince) > 0.4 {
+                isEditingSounds = false
+            }
+        })
+        // The keyboard (for naming a sound) floats over the controls instead of squashing
+        // them; the pop-up, laid over the top, still moves up out of its way.
+        .ignoresSafeArea(.keyboard)
+        .overlay { popup.environment(\.uiScale, popupScale) }
         .environment(wobble)
         .background(palette.background.ignoresSafeArea())
         .preferredColorScheme(palette.scheme)
         .transaction { $0.animation = nil }
         .onAppear {
             metronome.onInterruption = { isRunning = false }
-            metronome.setSound(sound)
+            applySound()
             metronome.setBar(beats: beatsPerBar, accented: accentEnabled)
             metronome.setRate(clicksPerMinute)
         }
@@ -163,8 +194,20 @@ struct ContentView: View {
         .onChange(of: accentEnabled) {
             metronome.setBar(beats: beatsPerBar, accented: accentEnabled)
         }
-        .onChange(of: sound) {
-            metronome.setSound(sound)
+        .onChange(of: soundChoice) {
+            applySound()
+        }
+        // Opening a shared .metrosound file (from Messages, AirDrop, Files...).
+        .onOpenURL { url in
+            guard url.pathExtension == SharedSound.fileExtension else { return }
+            if customSounds.isFull {
+                importProblem = .full
+            } else if let sound = SharedSound.read(from: url) {
+                if isRunning { toggleRunning() }
+                soundToImport = sound
+            } else {
+                importProblem = .unreadable
+            }
         }
         .onChange(of: scenePhase) {
             // Keep playing in the background if running; otherwise let the app sleep.
@@ -200,12 +243,12 @@ struct ContentView: View {
                         DancerGlyph(
                             metronome: metronome, palette: palette, isPlaying: isRunning,
                             landingTime: wobble.dancerLandingTime,
-                            beatsPerBar: accentEnabled ? beatsPerBar : nil, moveOffset: dancerMove,
+                            move: dancerMove, clicksPerMinute: clicksPerMinute,
                             partnerLandingTime: partnerLandingTime, onMove: noteMoveDanced
                         )
                         .frame(width: height * DancerGlyph.aspectRatio(withPartner: partnerLandingTime != nil))
                     } else if isRunning {
-                        MetronomeGlyph(metronome: metronome, palette: palette)
+                        MetronomeGlyph(metronome: metronome, palette: palette, clicksPerMinute: clicksPerMinute)
                             .frame(width: height * 0.9)
                     } else {
                         CapText(text: "METRONOME APP", size: titleSize, tracking: 3)
@@ -271,6 +314,8 @@ struct ContentView: View {
             tile(accentEnabled ? "ON" : "OFF", isOn: accentEnabled) {
                 accentEnabled.toggle()
             }
+            .opacity(accentAvailable ? 1 : 0.4)
+            .disabled(!accentAvailable)
             .accessibilityLabel("Time signature")
             .wobbly("accent")
         }
@@ -330,15 +375,167 @@ struct ContentView: View {
         .foregroundStyle(palette.text)
     }
 
-    private var soundRow: some View {
-        HStack(spacing: 8) {
-            ForEach(ClickSound.allCases) { option in
-                tile(option.name.uppercased(), isOn: sound == option) {
-                    sound = option
+    /// Every click sound in a row that scrolls sideways, then the user's own, then a
+    /// button to record another. Three fit at once, with the next peeking in to show
+    /// there are more.
+    private func soundRow(width: CGFloat) -> some View {
+        let tileWidth = (width - 8 * 3) / 3.4
+        return ScrollViewReader { proxy in
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    ForEach(ClickSound.allCases) { option in
+                        let choice = SoundChoice.builtIn(option)
+                        soundTile(option.name.uppercased(), isOn: soundChoice == choice, minWidth: tileWidth) {
+                            soundChoice = choice
+                        }
+                        .id(choice.rawValue)
+                        .wobbly("sound\(option.rawValue)")
+                    }
+                    // A thin rule sets the user's own sounds apart from the built-in ones.
+                    Capsule()
+                        .fill(palette.text.opacity(0.3))
+                        .frame(width: 2)
+                        .padding(.vertical, 8)
+                    ForEach(customSounds.all) { custom in
+                        customSoundTile(custom, minWidth: tileWidth)
+                            .id(SoundChoice.custom(custom.id).rawValue)
+                            .wobbly("custom-\(custom.id)")
+                    }
+                    if !customSounds.isFull {
+                        addSoundTile(width: tileWidth * 0.6)
+                            .id("add")
+                            .wobbly("addSound")
+                    }
                 }
-                .wobbly("sound\(option.rawValue)")
+            }
+            // Let knocked-off tiles tumble down the screen rather than vanish at the
+            // row's edge, and leave room for the delete badges.
+            .scrollClipDisabled()
+            .onAppear { proxy.scrollTo(soundChoice.rawValue, anchor: .center) }
+            .onChange(of: soundRowTarget) {
+                guard let soundRowTarget else { return }
+                withAnimation { proxy.scrollTo(soundRowTarget, anchor: .center) }
+                self.soundRowTarget = nil
             }
         }
+    }
+
+    /// Like `tile`, but sized to fit its name and selected on release, so dragging
+    /// across the row scrolls it instead of picking whatever the finger landed on.
+    /// While deleting, tapping any sound finishes instead.
+    /// `isRecorded` marks the user's own sounds with a small dot, like a recording light.
+    private func soundTile(
+        _ title: String, isOn: Bool, isRecorded: Bool = false, minWidth: CGFloat, action: @escaping () -> Void
+    ) -> some View {
+        HStack(spacing: 7) {
+            if isRecorded {
+                Circle()
+                    .fill(isOn ? palette.startText : palette.start)
+                    .frame(width: 7, height: 7)
+            }
+            TileLabel(text: title, size: 16)
+        }
+        .foregroundStyle(isOn ? palette.startText : palette.controlText)
+        .padding(.horizontal, 14)
+        .frame(minWidth: minWidth, maxHeight: .infinity)
+        .background(RoundedRectangle(cornerRadius: 12).fill(isOn ? palette.start : palette.control))
+        .contentShape(Rectangle())
+        .onTapGesture {
+            // Ignore the finger lifting from the hold that started editing.
+            if isEditingSounds {
+                if Date().timeIntervalSince(editingSoundsSince) > 0.4 { isEditingSounds = false }
+            } else {
+                action()
+            }
+        }
+        .accessibilityAddTraits(isOn ? [.isButton, .isSelected] : .isButton)
+    }
+
+    /// A recorded sound. Holding it shows a border, a wiggle and an edit badge on every recorded sound.
+    private func customSoundTile(_ custom: CustomSound, minWidth: CGFloat) -> some View {
+        let choice = SoundChoice.custom(custom.id)
+        return soundTile(custom.name.uppercased(), isOn: soundChoice == choice, isRecorded: true, minWidth: minWidth) {
+            soundChoice = choice
+        }
+        // A short hold or a double tap starts deleting and editing.
+        .onLongPressGesture(minimumDuration: 0.15, perform: startEditingSounds) { isPressing in
+            // Lifting the finger after the hold shouldn't count as a tap that stops it.
+            if !isPressing && isEditingSounds { editingSoundsSince = Date() }
+        }
+        .simultaneousGesture(TapGesture(count: 2).onEnded(startEditingSounds))
+        .overlay {
+            if isEditingSounds {
+                RoundedRectangle(cornerRadius: 12).strokeBorder(palette.text, lineWidth: 2)
+            }
+        }
+        .overlay(alignment: .topTrailing) {
+            if isEditingSounds {
+                PressButton(action: {
+                    isEditingSounds = false
+                    if isRunning { toggleRunning() }
+                    soundToEdit = custom
+                }) {
+                    ZStack {
+                        Circle().fill(palette.start)
+                        Circle().strokeBorder(palette.background, lineWidth: 2)
+                        Image(systemName: "pencil")
+                            .font(.system(size: 11, weight: .bold))
+                            .foregroundStyle(palette.startText)
+                    }
+                    .frame(width: 24, height: 24)
+                }
+                .offset(x: 8, y: -8)
+                .accessibilityLabel("Edit \(custom.name)")
+            }
+        }
+        .modifier(Wiggle(isOn: isEditingSounds, seed: custom.id.hashValue))
+        .accessibilityAction(named: "Edit") { soundToEdit = custom }
+    }
+
+    private func startEditingSounds() {
+        isEditingSounds = true
+        editingSoundsSince = Date()
+    }
+
+    /// A faint box with a plus, for recording a new sound.
+    private func addSoundTile(width: CGFloat) -> some View {
+        ZStack {
+            Capsule().frame(width: 18, height: 3)
+            Capsule().frame(width: 3, height: 18)
+        }
+        .foregroundStyle(palette.text)
+        .frame(width: width)
+        .frame(maxHeight: .infinity)
+        .editableHighlight(palette.text)
+        .contentShape(Rectangle())
+        .onTapGesture {
+            isEditingSounds = false
+            if isRunning { toggleRunning() }
+            isRecordingSound = true
+        }
+        .accessibilityLabel("Record a new sound")
+        .accessibilityAddTraits(.isButton)
+    }
+
+    /// Plays the chosen sound, falling back to Classic if a recording's gone missing.
+    private func applySound() {
+        switch soundChoice {
+        case .builtIn(let sound):
+            metronome.setSound(sound)
+        case .custom(let id):
+            guard let custom = customSounds.sound(id), let samples = customSounds.samples(for: id) else {
+                soundChoice = .builtIn(.classic)
+                return
+            }
+            metronome.setCustomSound(beat: samples.beat, downbeat: samples.downbeat, recordedAt: custom.sampleRate)
+        }
+        if !accentAvailable { accentEnabled = false }
+    }
+
+    /// A recorded sound without a downbeat has nothing to accent with, so the time signature stays off.
+    private var accentAvailable: Bool {
+        guard case .custom(let id) = soundChoice else { return true }
+        return customSounds.sound(id)?.hasDownbeat ?? true
     }
 
     private func startStopButton(fontSize: CGFloat) -> some View {
@@ -355,6 +552,64 @@ struct ContentView: View {
     }
 
     @ViewBuilder private var popup: some View {
+        if let importProblem {
+            PopupCard(
+                title: importProblem == .full ? "TOO MANY SOUNDS" : "CAN'T IMPORT THIS",
+                subtitle: importProblem == .full
+                    ? "You have \(CustomSounds.limit). Delete one, then import this sound."
+                    : "This file isn't a sound this app can read.",
+                palette: palette, onDismiss: { self.importProblem = nil }
+            ) {
+                tile("OK", isOn: true) { self.importProblem = nil }
+                    .frame(height: 48)
+            }
+        } else if let soundToImport {
+            ImportSoundView(
+                sound: soundToImport, palette: palette,
+                onImport: {
+                    let sound = customSounds.add(
+                        name: soundToImport.name, beat: soundToImport.beat,
+                        downbeat: soundToImport.downbeat, sampleRate: soundToImport.sampleRate
+                    )
+                    soundChoice = .custom(sound.id)
+                    self.soundToImport = nil
+                    soundRowTarget = SoundChoice.custom(sound.id).rawValue
+                },
+                onCancel: { self.soundToImport = nil }
+            )
+        } else if isRecordingSound {
+            RecordSoundView(
+                palette: palette, defaultName: customSounds.nextDefaultName,
+                onSave: { name, beat, downbeat, rate in
+                    let sound = customSounds.add(name: name, beat: beat, downbeat: downbeat, sampleRate: rate)
+                    soundChoice = .custom(sound.id)
+                    isRecordingSound = false
+                    soundRowTarget = SoundChoice.custom(sound.id).rawValue
+                },
+                onCancel: { isRecordingSound = false }
+            )
+        } else if let soundToEdit, let samples = customSounds.samples(for: soundToEdit.id) {
+            RecordSoundView(
+                palette: palette, defaultName: soundToEdit.name,
+                existing: .init(
+                    name: soundToEdit.name, beat: samples.beat, downbeat: samples.downbeat,
+                    sampleRate: soundToEdit.sampleRate
+                ),
+                onSave: { name, beat, downbeat, rate in
+                    customSounds.update(soundToEdit.id, name: name, beat: beat, downbeat: downbeat, sampleRate: rate)
+                    self.soundToEdit = nil
+                    // The choice hasn't changed, so pick up the new recordings by hand.
+                    if soundChoice == .custom(soundToEdit.id) { applySound() }
+                },
+                onCancel: { self.soundToEdit = nil },
+                onDelete: { delete(soundToEdit) }
+            )
+        } else {
+            fieldPopup
+        }
+    }
+
+    @ViewBuilder private var fieldPopup: some View {
         switch editingField {
         case .tempo:
             Keypad(
@@ -366,13 +621,13 @@ struct ContentView: View {
             Keypad(
                 title: "BEATS PER BAR", value: beatsPerBar, range: beatsRange, palette: palette,
                 // Confirming either number switches the time signature on.
-                onCommit: { beatsPerBar = $0; accentEnabled = true; editingField = nil },
+                onCommit: { beatsPerBar = $0; accentEnabled = accentAvailable; editingField = nil },
                 onCancel: { editingField = nil }
             )
         case .beatUnit:
             ChoicePad(
                 title: "NOTE VALUE", options: beatUnits, selected: beatUnit, palette: palette,
-                onSelect: { beatUnit = $0; accentEnabled = true; editingField = nil },
+                onSelect: { beatUnit = $0; accentEnabled = accentAvailable; editingField = nil },
                 onCancel: { editingField = nil }
             )
         case nil:
@@ -412,6 +667,14 @@ struct ContentView: View {
     }
 
     // MARK: - Actions
+
+    /// Removes a recorded sound; the ones after it close up the gap.
+    private func delete(_ custom: CustomSound) {
+        customSounds.delete(custom.id)
+        if soundChoice == .custom(custom.id) { soundChoice = .builtIn(.classic) }
+        soundToEdit = nil
+        if customSounds.all.isEmpty { isEditingSounds = false }
+    }
 
     private func toggleRunning() {
         if isRunning {
@@ -468,9 +731,16 @@ struct ContentView: View {
     /// Sets the tempo from the average gap between the last few taps.
     private func tapTempo() {
         let now = Date()
-        // A long pause starts a fresh measurement.
-        if let last = tapTimes.last, now.timeIntervalSince(last) > 2 {
-            tapTimes.removeAll()
+        if let last = tapTimes.last, let first = tapTimes.first {
+            let gap = now.timeIntervalSince(last)
+            // Over a minute apart is slower than 1 BPM, so start a fresh measurement.
+            if gap > 60 {
+                tapTimes.removeAll()
+            } else if tapTimes.count >= 2 {
+                // A gap far off the tapped tempo means a new tempo: measure from the last tap.
+                let average = last.timeIntervalSince(first) / Double(tapTimes.count - 1)
+                if gap > average * 2 || gap < average / 2 { tapTimes = [last] }
+            }
         }
         tapTimes = Array((tapTimes + [now]).suffix(5))
 
@@ -481,6 +751,19 @@ struct ContentView: View {
 
     private func clamped(_ value: Int, to range: ClosedRange<Int>) -> Int {
         min(max(value, range.lowerBound), range.upperBound)
+    }
+}
+
+/// Rocks a view gently from side to side, like an app icon waiting to be deleted.
+private struct Wiggle: ViewModifier {
+    let isOn: Bool
+    let seed: Int
+
+    func body(content: Content) -> some View {
+        TimelineView(.animation(paused: !isOn)) { context in
+            let t = context.date.timeIntervalSinceReferenceDate
+            content.rotationEffect(.degrees(isOn ? 2 * sin(t * 22 + Double(seed % 100)) : 0))
+        }
     }
 }
 

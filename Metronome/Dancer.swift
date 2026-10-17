@@ -1,19 +1,20 @@
 import SwiftUI
 
-/// Easter egg reward: a stick figure dancing in time with the click.
-/// With a time signature it changes move every bar; without one it keeps the same
-/// move until tapped. While stopped it idles, waiting to dance. On its first arrival
-/// it drops in and does a superhero landing. Once every move has been danced, a
-/// partner drops in beside it and dances its mirror image.
+/// Easter egg reward: a stick figure dancing in time with the click. It keeps the
+/// same move until tapped, and while stopped it idles, waiting to dance. Shaken, it
+/// teeters; knocked off, it flails; whenever it drops back in, it does a superhero
+/// landing. Once every move has been danced, a partner drops in beside it and dances
+/// its mirror image. From then on she lands gracefully and he lands in a heap.
+/// Very fast tempos wear them out until they stop to pant; very slow ones bore them.
 struct DancerGlyph: View {
+    @Environment(Wobble.self) private var wobble
     let metronome: Metronome
     let palette: Palette
     let isPlaying: Bool
     let landingTime: Date?
-    /// Beats per bar while the time signature is on; nil when it's off.
-    let beatsPerBar: Int?
-    /// Moves skipped by tapping.
-    let moveOffset: Int
+    /// Which move to dance, chosen at START and by tapping.
+    let move: Int
+    let clicksPerMinute: Double
     /// When the partner lands, once she's been unlocked.
     let partnerLandingTime: Date?
     /// Reports each move as it starts, so the partner can be unlocked.
@@ -24,39 +25,33 @@ struct DancerGlyph: View {
     static func aspectRatio(withPartner: Bool) -> CGFloat { withPartner ? 2.3 : 1.3 }
 
     private let partnerColour = Color(hex: 0xF4A3C0)
+    private let sweatColour = Color(hex: 0x8FD3FF)
+    @State private var stamina = Stamina()
     /// How long the partner takes to drop in from above before landing.
     static let partnerDropDuration = 0.45
+    /// Room above the figures, relative to their height, so raised hands aren't cut off.
+    private static let headroom = 0.08
 
     var body: some View {
-        TimelineView(.animation) { context in
+        // Idling is slow and gentle, so half the frame rate does; shaking and dancing get the lot.
+        TimelineView(.animation(minimumInterval: isPlaying || wobble.isAnimating ? nil : 1 / 30)) { context in
             let now = context.date
-            let phase = metronome.beatPhase() ?? 0
-            // Follow the engine's bars, so moves change exactly on the accented downbeat.
-            let bar = beatsPerBar == nil ? 0 : metronome.bar(containingBeat: Int(floor(phase)))
-            let moveIndex = (bar + moveOffset) % Self.moveCount
-            let move = DanceMove.allCases[moveIndex]
-            let idleTime = now.timeIntervalSinceReferenceDate
-
-            let dance = isPlaying ? Pose.at(beatPhase: phase, move: move) : Pose.idle(at: idleTime)
-            let sinceLanding = landingTime.map { now.timeIntervalSince($0) } ?? .infinity
-            let pose = Pose.landing(at: sinceLanding, thenDancing: dance)
-
-            // The partner mirrors the dance; while idle she does her own thing.
-            let partnerDance = isPlaying ? dance.mirrored : Pose.idle(at: idleTime + 29).mirrored
+            let moveIndex = move % Self.moveCount
+            let (pose, partnerPose) = poses(at: now, moveIndex: moveIndex)
+            let sweat = stamina.sweat
+            let time = now.timeIntervalSinceReferenceDate
             let sincePartnerLanding = partnerLandingTime.map { now.timeIntervalSince($0) }
 
-            Canvas { context, size in
-                let unit = size.height
-                if let sincePartnerLanding {
-                    draw(pose, in: &context, centreX: size.width * 0.28, unit: unit, colour: palette.text)
-                    // Drops in from above the glyph, then lands like he did.
-                    let drop = max(-sincePartnerLanding / Self.partnerDropDuration, 0)
-                    let partnerPose = Pose.landing(at: sincePartnerLanding, thenDancing: partnerDance)
-                    draw(partnerPose, in: &context, centreX: size.width * 0.72, unit: unit, colour: partnerColour,
-                         isPartner: true, dropOffset: -unit * 1.2 * drop * drop)
-                } else {
-                    draw(pose, in: &context, centreX: size.width / 2, unit: unit, colour: palette.text)
+            GeometryReader { geometry in
+                let headroom = geometry.size.height * Self.headroom
+                Canvas { context, size in
+                    let unit = size.height - headroom
+                    context.translateBy(x: 0, y: headroom)
+                    drawFigures(pose, partnerPose, sincePartnerLanding: sincePartnerLanding, sweat: sweat,
+                                time: time, in: &context, width: size.width, unit: unit)
                 }
+                // Reach up past the frame, keeping the figures full height.
+                .padding(.top, -headroom)
             }
             .onChange(of: moveIndex, initial: true) {
                 if isPlaying { onMove(moveIndex) }
@@ -68,10 +63,71 @@ struct DancerGlyph: View {
         .accessibilityLabel(isPlaying ? "Dancing to the beat" : "Waiting to dance")
     }
 
+    /// Draws him, and her beside him once she's arrived.
+    private func drawFigures(
+        _ pose: Pose, _ partnerPose: Pose, sincePartnerLanding: Double?, sweat: Double, time: Double,
+        in context: inout GraphicsContext, width: CGFloat, unit: CGFloat
+    ) {
+        guard let sincePartnerLanding else {
+            draw(pose, in: &context, centreX: width / 2, unit: unit, colour: palette.text, sweat: sweat, time: time)
+            return
+        }
+        draw(pose, in: &context, centreX: width * 0.28, unit: unit, colour: palette.text, sweat: sweat, time: time)
+        // Drops in from above the glyph, then lands.
+        let drop = max(-sincePartnerLanding / Self.partnerDropDuration, 0)
+        draw(partnerPose, in: &context, centreX: width * 0.72, unit: unit, colour: partnerColour,
+             isPartner: true, dropOffset: -unit * 1.2 * drop * drop, sweat: sweat, time: time + 0.37)
+    }
+
+    /// Where each of them is at `now`: his pose, and hers for when she's there.
+    private func poses(at now: Date, moveIndex: Int) -> (Pose, Pose) {
+        // Just after START the heard beat can sit a hair before zero; moves index by beat.
+        let phase = max(metronome.beatPhase() ?? 0, 0)
+        let idleTime = now.timeIntervalSinceReferenceDate
+
+        // Shaking throws them off balance, leaning against the title's tilt.
+        let instability = wobble.instability(at: now)
+        let lean = wobble.motion(for: "title", at: now).angle / 6
+        let move = Pose.at(beatPhase: phase, move: DanceMove.allCases[moveIndex])
+        // Too slow and they fidget; too fast for too long and they stop to catch their breath.
+        stamina.update(at: now, isDancing: isPlaying, clicksPerMinute: clicksPerMinute)
+        let boredom = Pose.boredom(atClicksPerMinute: clicksPerMinute)
+        let resting = stamina.restAmount(at: now)
+        func danced(_ move: Pose, offset: Double, mirrored: Bool) -> Pose {
+            let fidgeting = Pose.fidgeting(move, at: idleTime + offset, amount: boredom)
+            let panting = Pose.panting(at: idleTime + offset)
+            return Pose.mix(fidgeting, mirrored ? panting.mirrored : panting, resting)
+        }
+        let dance = isPlaying ? danced(move, offset: 0, mirrored: false) : Pose.idle(at: idleTime)
+        let steady = Pose.teetering(dance, at: idleTime, lean: lean, instability: instability)
+        let sinceLanding = landingTime.map { now.timeIntervalSince($0) } ?? .infinity
+        // Knocked off since the last landing: flailing on the way down.
+        var sinceFall: Double?
+        if let fall = wobble.dancerFallTime, landingTime.map({ fall > $0 }) ?? true {
+            sinceFall = now.timeIntervalSince(fall)
+        }
+
+        var pose = partnerLandingTime == nil
+            ? Pose.landing(at: sinceLanding, thenDancing: steady)
+            : Pose.clumsyLanding(at: sinceLanding, thenDancing: steady)
+        if let sinceFall { pose = Pose.flailing(at: sinceFall) }
+
+        // The partner mirrors the dance; while idle she does her own thing.
+        let partnerDance = isPlaying ? danced(move.mirrored, offset: 3.3, mirrored: true) : Pose.idle(at: idleTime + 29).mirrored
+        let partnerSteady = Pose.teetering(partnerDance, at: idleTime + 0.3, lean: lean, instability: instability)
+        // Whenever they're knocked off again, she lands alongside him.
+        let sincePartnerLanding = partnerLandingTime.map { min(now.timeIntervalSince($0), sinceLanding) } ?? .infinity
+        var partnerPose = Pose.gracefulLanding(at: sincePartnerLanding, thenDancing: partnerSteady)
+        // While he's down she winces and watches him.
+        partnerPose = Pose.mix(partnerPose, Pose.concerned(at: idleTime), Pose.concern(whileHeIsDownFor: sinceLanding))
+        if let sinceFall { partnerPose = Pose.flailing(at: sinceFall + 0.4).mirrored }
+        return (pose, partnerPose)
+    }
+
     /// Draws one stick figure. Poses use a unit square, y pointing down, fitted to the height.
     private func draw(
         _ pose: Pose, in context: inout GraphicsContext, centreX: CGFloat, unit: CGFloat, colour: Color,
-        isPartner: Bool = false, dropOffset: CGFloat = 0
+        isPartner: Bool = false, dropOffset: CGFloat = 0, sweat: Double = 0, time: Double = 0
     ) {
         let originX = centreX - unit / 2
         func point(_ p: CGPoint) -> CGPoint { CGPoint(x: originX + p.x * unit, y: p.y * unit + dropOffset) }
@@ -112,6 +168,67 @@ struct DancerGlyph: View {
             context.fill(circle(CGPoint(x: pose.head.x + away * 0.1, y: pose.head.y - 0.02), radius: unit * 0.05), with: ink)
         }
         context.fill(circle(pose.head, radius: unit * 0.1), with: ink)
+
+        // Beads of sweat flicking off either side of the head.
+        guard sweat > 0.01 else { return }
+        let drops = 4
+        for k in 0..<drops {
+            let phase = (time * 1.4 + Double(k) / Double(drops)).truncatingRemainder(dividingBy: 1)
+            let side: Double = k % 2 == 0 ? 1 : -1
+            let centre = point(CGPoint(
+                x: pose.head.x + side * (0.1 + 0.12 * phase),
+                y: pose.head.y - 0.06 - 0.1 * phase + 0.35 * phase * phase
+            ))
+            let r = unit * 0.022
+            var bead = Path(ellipseIn: CGRect(x: centre.x - r, y: centre.y - r, width: r * 2, height: r * 2))
+            bead.move(to: CGPoint(x: centre.x - r * 0.8, y: centre.y - r * 0.5))
+            bead.addLine(to: CGPoint(x: centre.x, y: centre.y - r * 2.2))
+            bead.addLine(to: CGPoint(x: centre.x + r * 0.8, y: centre.y - r * 0.5))
+            context.fill(bead, with: .color(sweatColour.opacity(sweat * (1 - phase))))
+        }
+    }
+}
+
+/// How worn out they get dancing fast. At 300 clicks a minute they tire in about 20
+/// seconds, stop to catch their breath, then go again, tiring quicker the second time.
+private final class Stamina {
+    private static let restDuration = 6.0
+    private var tiredness = 0.0
+    private var restStart: Date?
+    private var lastUpdate: Date?
+
+    func update(at now: Date, isDancing: Bool, clicksPerMinute: Double) {
+        let elapsed = min(max(now.timeIntervalSince(lastUpdate ?? now), 0), 0.25)
+        lastUpdate = now
+        if let restStart {
+            if !isDancing {
+                self.restStart = nil
+            } else if now.timeIntervalSince(restStart) >= Self.restDuration {
+                self.restStart = nil
+                tiredness = 0.5
+            }
+            return
+        }
+        // Nothing below 200; one unit of strain at 300.
+        let strain = (clicksPerMinute - 200) / 100
+        if isDancing && strain > 0 {
+            tiredness += elapsed * strain / 20
+        } else {
+            tiredness = max(tiredness - elapsed / 20, 0)
+        }
+        if tiredness >= 1 && isDancing { restStart = now }
+    }
+
+    /// How far into catching their breath they are: easing in, holding, easing out.
+    func restAmount(at now: Date) -> Double {
+        guard let restStart else { return 0 }
+        let t = now.timeIntervalSince(restStart)
+        return Pose.ease(t / 0.5) * (1 - Pose.ease((t - (Self.restDuration - 0.6)) / 0.6))
+    }
+
+    /// Building up as they tire, and pouring off them while they rest.
+    var sweat: Double {
+        restStart != nil ? 1 : min(max((tiredness - 0.35) / 0.5, 0), 1)
     }
 }
 
@@ -310,7 +427,6 @@ private struct Pose {
     /// floor), holds it, then stands and blends into the dance.
     static func landing(at time: Double, thenDancing dance: Pose) -> Pose {
         let impact = 0.12, hold = 0.9, rise = 1.3, blend = 1.6
-        func ease(_ t: Double) -> Double { (1 - cos(.pi * min(max(t, 0), 1))) / 2 }
 
         switch time {
         case ..<0: return falling
@@ -320,6 +436,185 @@ private struct Pose {
         case ..<blend: return mix(standing(x: 0.5, bob: 0), dance, ease((time - rise) / (blend - rise)))
         default: return dance
         }
+    }
+
+    /// No superhero flair: lands in a heap on his back, lies there with a feeble kick,
+    /// sits up rubbing his spinning head, then slowly gets back up.
+    static func clumsyLanding(at time: Double, thenDancing dance: Pose) -> Pose {
+        let impact = 0.1, lie = 1.8, sit = 2.3, dazed = 3.0, rise = 3.6, blend = 4.0
+        let upright = standing(x: 0.5, bob: 0)
+
+        switch time {
+        case ..<0: return falling
+        case ..<impact: return mix(falling, sprawled, time / impact)
+        case ..<lie:
+            var pose = sprawled
+            let kick = time > 0.8 && time < 1.5 ? max(sin((time - 0.8) * 9), 0) : 0
+            pose.leftKnee.y -= 0.04 * kick
+            pose.leftFoot.y -= 0.07 * kick
+            return pose
+        case ..<sit: return mix(sprawled, dizzy(at: time), ease((time - lie) / (sit - lie)))
+        case ..<dazed: return dizzy(at: time)
+        case ..<rise: return mix(dizzy(at: time), upright, ease((time - dazed) / (rise - dazed)))
+        case ..<blend: return mix(upright, dance, ease((time - rise) / (blend - rise)))
+        default: return dance
+        }
+    }
+
+    /// Drops with toes pointed, sinks softly into a plié and rises into a "ta-da".
+    static func gracefulLanding(at time: Double, thenDancing dance: Pose) -> Pose {
+        let impact = 0.15, rise = 0.55, hold = 1.8, blend = 2.2
+
+        switch time {
+        case ..<0: return pointedFall
+        case ..<impact: return mix(pointedFall, plie, ease(time / impact))
+        case ..<rise: return mix(plie, taDa, ease((time - impact) / (rise - impact)))
+        case ..<hold: return taDa
+        case ..<blend: return mix(taDa, dance, ease((time - hold) / (blend - hold)))
+        default: return dance
+        }
+    }
+
+    /// How much she's watching him after he lands in a heap: from just after she's
+    /// struck her pose, until he's back on his feet.
+    static func concern(whileHeIsDownFor time: Double) -> Double {
+        ease((time - 1.5) / 0.4) * (1 - ease((time - 3.2) / 0.4))
+    }
+
+    /// Wincing at him, off to her left: leaning in for a look, hand to her cheek.
+    static func concerned(at t: Double) -> Pose {
+        var pose = standing(x: 0.5, bob: 0.01)
+        pose.head = CGPoint(x: 0.42, y: 0.16 + 0.005 * sin(t * 3))
+        pose.neck = CGPoint(x: 0.46, y: 0.28)
+        pose.leftElbow = CGPoint(x: 0.3, y: 0.38)
+        pose.leftHand = CGPoint(x: 0.31, y: 0.22)
+        pose.rightElbow = CGPoint(x: 0.64, y: 0.44)
+        pose.rightHand = CGPoint(x: 0.56, y: 0.58)
+        return pose
+    }
+
+    /// Arms windmilling and legs kicking, as it's knocked off the screen.
+    static func flailing(at t: Double) -> Pose {
+        var pose = standing(x: 0.5, bob: 0)
+        let spin = t * 16
+        pose.leftHand = CGPoint(x: 0.3 + 0.14 * cos(spin), y: 0.24 + 0.14 * sin(spin))
+        pose.rightHand = CGPoint(x: 0.7 - 0.14 * cos(spin + 1), y: 0.24 + 0.14 * sin(spin + 1))
+        pose.leftElbow = mix(pose.neck, pose.leftHand, 0.5)
+        pose.leftElbow.x -= 0.04
+        pose.rightElbow = mix(pose.neck, pose.rightHand, 0.5)
+        pose.rightElbow.x += 0.04
+        let kick = sin(t * 18)
+        pose.leftKnee = CGPoint(x: 0.44 - 0.04 * kick, y: 0.76 - 0.05 * max(kick, 0))
+        pose.leftFoot = CGPoint(x: 0.4 - 0.08 * kick, y: 0.94 - 0.08 * max(kick, 0))
+        pose.rightKnee = CGPoint(x: 0.56 + 0.04 * kick, y: 0.76 - 0.05 * max(-kick, 0))
+        pose.rightFoot = CGPoint(x: 0.6 + 0.08 * kick, y: 0.94 - 0.08 * max(-kick, 0))
+        return pose
+    }
+
+    /// Thrown off balance: knees bent, arms out and flapping, leaning against the
+    /// tilt (`lean` from -1 to 1). Light shaking blends a little of it in; heavier
+    /// shaking (`instability` past 1) makes the flapping and leaning bigger.
+    static func teetering(_ pose: Pose, at t: Double, lean: Double, instability: Double) -> Pose {
+        guard instability > 0.01 else { return pose }
+        let amount = min(instability * 1.3, 1)
+        let scale = 0.9 + 0.4 * min(max(instability - 0.8, 0), 2)
+        let flap = sin(t * 22) * scale
+        let shift = -lean * 0.06 * scale
+        var wobbly = standing(x: 0.5, bob: 0.03 * scale)
+        wobbly.head.x += shift * 1.5
+        wobbly.neck.x += shift
+        wobbly.leftElbow = CGPoint(x: 0.36 + shift, y: 0.32 + 0.04 * flap)
+        wobbly.leftHand = CGPoint(x: 0.2 + shift, y: 0.28 + 0.1 * flap)
+        wobbly.rightElbow = CGPoint(x: 0.64 + shift, y: 0.32 - 0.04 * flap)
+        wobbly.rightHand = CGPoint(x: 0.8 + shift, y: 0.28 - 0.1 * flap)
+        wobbly.leftKnee = CGPoint(x: 0.4, y: 0.78)
+        wobbly.leftFoot = CGPoint(x: 0.38, y: 0.97)
+        wobbly.rightKnee = CGPoint(x: 0.6, y: 0.78)
+        wobbly.rightFoot = CGPoint(x: 0.62, y: 0.97)
+        return mix(pose, wobbly, amount)
+    }
+
+    /// Bent over with hands on knees, chest heaving, catching their breath.
+    static func panting(at t: Double) -> Pose {
+        let heave = 0.012 * sin(t * 9)
+        return Pose(
+            head: CGPoint(x: 0.36, y: 0.33 + heave), neck: CGPoint(x: 0.43, y: 0.42 + heave), hip: CGPoint(x: 0.6, y: 0.6),
+            leftElbow: CGPoint(x: 0.39, y: 0.6 + heave / 2), leftHand: CGPoint(x: 0.49, y: 0.73),
+            rightElbow: CGPoint(x: 0.52, y: 0.61 + heave / 2), rightHand: CGPoint(x: 0.62, y: 0.73),
+            leftKnee: CGPoint(x: 0.5, y: 0.77), leftFoot: CGPoint(x: 0.46, y: 0.97),
+            rightKnee: CGPoint(x: 0.64, y: 0.77), rightFoot: CGPoint(x: 0.68, y: 0.97)
+        )
+    }
+
+    /// How bored a tempo makes them: not at all from 30 clicks a minute, completely by 15.
+    static func boredom(atClicksPerMinute clicksPerMinute: Double) -> Double {
+        min(max((30 - clicksPerMinute) / 15, 0), 1)
+    }
+
+    /// Bored stiff by a very slow beat: every few seconds they break off to check the
+    /// time, scratch, tap a foot, yawn or look around, then go back to the dance.
+    static func fidgeting(_ dance: Pose, at t: Double, amount: Double) -> Pose {
+        guard amount > 0 else { return dance }
+        let fidgets: [IdleStep] = [.checkWatch, .scratch, .tapFoot, .yawn, .lookAround]
+        let cycle = 6.5
+        let local = t.truncatingRemainder(dividingBy: cycle)
+        let step = fidgets[Int(t / cycle) % fidgets.count]
+        let weight = ease((local - 0.8) / 0.5) * (1 - ease((local - 4.8) / 0.5))
+        return mix(dance, step.pose(at: local), weight * amount)
+    }
+
+    /// Eases from 0 to 1 as `t` goes from 0 to 1, clamped either side.
+    fileprivate static func ease(_ t: Double) -> Double { (1 - cos(.pi * min(max(t, 0), 1))) / 2 }
+
+    /// Sitting up, rubbing his head as it spins.
+    private static func dizzy(at t: Double) -> Pose {
+        var pose = sitting
+        pose.head.x += 0.03 * cos(t * 6)
+        pose.head.y += 0.015 * sin(t * 6)
+        pose.rightElbow = CGPoint(x: 0.7, y: 0.5)
+        pose.rightHand = CGPoint(x: 0.61, y: 0.44)
+        return pose
+    }
+
+    /// Flat on his back, limbs everywhere.
+    private static let sprawled = Pose(
+        head: CGPoint(x: 0.14, y: 0.86), neck: CGPoint(x: 0.27, y: 0.9), hip: CGPoint(x: 0.6, y: 0.92),
+        leftElbow: CGPoint(x: 0.3, y: 0.78), leftHand: CGPoint(x: 0.22, y: 0.68),
+        rightElbow: CGPoint(x: 0.4, y: 0.95), rightHand: CGPoint(x: 0.5, y: 0.97),
+        leftKnee: CGPoint(x: 0.74, y: 0.8), leftFoot: CGPoint(x: 0.88, y: 0.94),
+        rightKnee: CGPoint(x: 0.76, y: 0.93), rightFoot: CGPoint(x: 0.94, y: 0.95)
+    )
+
+    private static let pointedFall = Pose(
+        head: CGPoint(x: 0.5, y: 0.14), neck: CGPoint(x: 0.5, y: 0.28), hip: CGPoint(x: 0.5, y: 0.58),
+        leftElbow: CGPoint(x: 0.4, y: 0.18), leftHand: CGPoint(x: 0.36, y: 0.04),
+        rightElbow: CGPoint(x: 0.6, y: 0.18), rightHand: CGPoint(x: 0.64, y: 0.04),
+        leftKnee: CGPoint(x: 0.48, y: 0.76), leftFoot: CGPoint(x: 0.49, y: 0.94),
+        rightKnee: CGPoint(x: 0.52, y: 0.76), rightFoot: CGPoint(x: 0.51, y: 0.94)
+    )
+
+    /// Knees softly bent, arms held out to the sides.
+    private static var plie: Pose {
+        var pose = standing(x: 0.5, bob: 0.05)
+        pose.leftElbow = CGPoint(x: 0.36, y: 0.36)
+        pose.leftHand = CGPoint(x: 0.22, y: 0.34)
+        pose.rightElbow = CGPoint(x: 0.64, y: 0.36)
+        pose.rightHand = CGPoint(x: 0.78, y: 0.34)
+        pose.leftKnee = CGPoint(x: 0.42, y: 0.79)
+        pose.rightKnee = CGPoint(x: 0.58, y: 0.79)
+        return pose
+    }
+
+    /// Up on her toes, arms raised in a V.
+    private static var taDa: Pose {
+        var pose = standing(x: 0.5, bob: -0.02)
+        pose.leftElbow = CGPoint(x: 0.38, y: 0.14)
+        pose.leftHand = CGPoint(x: 0.3, y: 0.0)
+        pose.rightElbow = CGPoint(x: 0.62, y: 0.14)
+        pose.rightHand = CGPoint(x: 0.7, y: 0.0)
+        pose.leftFoot.y = 0.95
+        pose.rightFoot.y = 0.95
+        return pose
     }
 
     private static let falling = Pose(
@@ -338,7 +633,7 @@ private struct Pose {
         rightKnee: CGPoint(x: 0.66, y: 0.97), rightFoot: CGPoint(x: 0.84, y: 0.97)
     )
 
-    private static func mix(_ a: Pose, _ b: Pose, _ t: Double) -> Pose {
+    fileprivate static func mix(_ a: Pose, _ b: Pose, _ t: Double) -> Pose {
         Pose(
             head: mix(a.head, b.head, t), neck: mix(a.neck, b.neck, t), hip: mix(a.hip, b.hip, t),
             leftElbow: mix(a.leftElbow, b.leftElbow, t), leftHand: mix(a.leftHand, b.leftHand, t),
@@ -491,7 +786,7 @@ private struct Pose {
             (CGPoint(x: x - 0.14, y: 0.42), CGPoint(x: x - 0.02, y: 0.42), CGPoint(x: x + 0.16, y: 0.3), CGPoint(x: x + 0.3, y: 0.3)),
             (CGPoint(x: x - 0.16, y: 0.3), CGPoint(x: x - 0.3, y: 0.3), CGPoint(x: x + 0.14, y: 0.42), CGPoint(x: x + 0.02, y: 0.42)),
         ]
-        let from = armPoses[(beat + 3) % 4], to = armPoses[beat % 4]
+        let from = armPoses[(beat % 4 + 7) % 4], to = armPoses[(beat % 4 + 4) % 4]
         var pose = standing(x: x, bob: 0)
         pose.leftElbow = mix(from.leftElbow, to.leftElbow, snap)
         pose.leftHand = mix(from.leftHand, to.leftHand, snap)
@@ -507,7 +802,7 @@ private struct Pose {
     private static func sprinkler(beat: Int, snap: Double, lift: Double) -> Pose {
         let x = 0.5
         let reaches = [0.32, 0.24, 0.16, 0.08]
-        let from = reaches[(beat + 3) % 4], to = reaches[beat % 4]
+        let from = reaches[(beat % 4 + 7) % 4], to = reaches[(beat % 4 + 4) % 4]
         let reach = from + (to - from) * snap
         var pose = squat(x: x, depth: 0.03 * lift, kneeSpread: 0.08)
         pose.leftElbow = CGPoint(x: x - 0.15, y: pose.neck.y - 0.06)

@@ -9,21 +9,26 @@ final class Metronome {
     private let generator: ClickGenerator
     private let source: AVAudioSourceNode
     private var observers: [NSObjectProtocol] = []
+    private var idlePause: Task<Void, Never>?
+    /// The delay between rendering audio and hearing it, read when the route might have
+    /// changed rather than every frame: asking the audio session costs time.
+    private var outputLatency = AVAudioSession.sharedInstance().outputLatency
 
     /// Called when something else (like a phone call) stops the click.
     var onInterruption: () -> Void = {}
 
-    init() {
-        // .playback keeps the click audible even with the silent switch on.
-        let session = AVAudioSession.sharedInstance()
-        try? session.setCategory(.playback)
-        // Activate asynchronously; the synchronous setActive can block the main thread.
-        session.activate { success, error in
-            if !success { print("Failed to activate audio session: \(String(describing: error))") }
-        }
+    /// The rate the click is generated at; recordings are converted to match.
+    let sampleRate: Double
+    /// Built-in sounds, rendered the first time each is chosen.
+    private var builtInClicks: [ClickSound: ClickGenerator.Clicks] = [:]
 
-        let sampleRate = engine.outputNode.outputFormat(forBus: 0).sampleRate
-        let format = AVAudioFormat(standardFormatWithSampleRate: sampleRate > 0 ? sampleRate : 44_100, channels: 1)!
+    init() {
+        Self.usePlaybackSession()
+        let session = AVAudioSession.sharedInstance()
+
+        let outputRate = engine.outputNode.outputFormat(forBus: 0).sampleRate
+        let format = AVAudioFormat(standardFormatWithSampleRate: outputRate > 0 ? outputRate : 44_100, channels: 1)!
+        sampleRate = format.sampleRate
         generator = ClickGenerator(sampleRate: format.sampleRate)
         source = AVAudioSourceNode(format: format, renderBlock: generator.makeRenderBlock())
         engine.attach(source)
@@ -40,7 +45,9 @@ final class Metronome {
         // Plugging in or removing headphones stops the engine; restart it if we were playing.
         observers.append(center.addObserver(forName: .AVAudioEngineConfigurationChange, object: engine, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated {
-                guard let self, self.generator.isActive else { return }
+                guard let self else { return }
+                self.outputLatency = AVAudioSession.sharedInstance().outputLatency
+                guard self.generator.isActive else { return }
                 try? self.engine.start()
             }
         })
@@ -53,31 +60,78 @@ final class Metronome {
     }
 
     func start(clicksPerMinute: Double) throws {
+        idlePause?.cancel()
         generator.setRate(clicksPerMinute)
-        // The engine keeps running (outputting silence) after the first start,
-        // so later starts are instant.
+        // The engine keeps running (outputting silence) for a while after stopping,
+        // so starting again soon after is instant.
         if !engine.isRunning { try engine.start() }
+        outputLatency = AVAudioSession.sharedInstance().outputLatency
         generator.start()
     }
 
     func stop() {
         generator.stop()
+        // Running silence keeps the audio hardware awake, so let it rest after a while.
+        idlePause?.cancel()
+        idlePause = Task {
+            try? await Task.sleep(for: .seconds(15))
+            if !Task.isCancelled { pauseIfIdle() }
+        }
     }
 
     /// How many beats have been heard since START, including the fraction of the
     /// current beat, so visuals can follow the audio exactly. Nil until the first sound.
     func beatPhase() -> Double? {
         // Compensate for the delay between rendering audio and hearing it.
-        let latency = AVAudioSession.sharedInstance().outputLatency
-        return generator.beatPhase(atSeconds: HostClock.now - latency)
+        generator.beatPhase(atSeconds: HostClock.now - outputLatency)
     }
 
     func setRate(_ clicksPerMinute: Double) {
         generator.setRate(clicksPerMinute)
     }
 
+    /// Sets up audio for playing only, as normal (recording a sound switches it).
+    static func usePlaybackSession() {
+        // .playback keeps the click audible even with the silent switch on;
+        // mixing lets it play over music or video instead of stopping them.
+        let session = AVAudioSession.sharedInstance()
+        try? session.setCategory(.playback, options: .mixWithOthers)
+        // Activate asynchronously; the synchronous setActive can block the main thread.
+        session.activate { success, error in
+            if !success { print("Failed to activate audio session: \(String(describing: error))") }
+        }
+    }
+
     func setSound(_ sound: ClickSound) {
-        generator.setSound(sound)
+        if builtInClicks[sound] == nil {
+            builtInClicks[sound] = ClickGenerator.Clicks(
+                normal: sound.samples(sampleRate: sampleRate, variant: .normal),
+                accent: sound.samples(sampleRate: sampleRate, variant: .accent),
+                alternate: sound.samples(sampleRate: sampleRate, variant: .alternate)
+            )
+        }
+        generator.setClicks(builtInClicks[sound]!)
+    }
+
+    /// Plays a recorded sound, with its own downbeat if one was recorded.
+    func setCustomSound(beat: [Float], downbeat: [Float]?, recordedAt rate: Double) {
+        let normal = Self.resample(beat, from: rate, to: sampleRate)
+        let accent = downbeat.map { Self.resample($0, from: rate, to: sampleRate) } ?? normal
+        generator.setClicks(ClickGenerator.Clicks(normal: normal, accent: accent, alternate: normal))
+    }
+
+    /// Converts samples between rates, interpolating linearly; fine for short clicks.
+    nonisolated static func resample(_ samples: [Float], from source: Double, to target: Double) -> [Float] {
+        guard source != target, !samples.isEmpty else { return samples }
+        let step = source / target
+        let count = Int(Double(samples.count) / step)
+        return (0..<count).map { i in
+            let position = Double(i) * step
+            let index = Int(position)
+            let next = min(index + 1, samples.count - 1)
+            let fraction = Float(position - Double(index))
+            return samples[index] + (samples[next] - samples[index]) * fraction
+        }
     }
 
     /// With `accented`, the first of every `beats` clicks is pitched up.
@@ -85,65 +139,53 @@ final class Metronome {
     func setBar(beats: Int, accented: Bool) {
         generator.setBar(beats: beats, accented: accented)
     }
-
-    /// Which bar a beat (from `beatPhase`) falls in, matching the accented downbeats.
-    func bar(containingBeat beat: Int) -> Int {
-        generator.bar(containingBeat: beat)
-    }
 }
 
 /// Renders the click. Settings are shared with the main thread through atomics;
-/// `framesSinceBeat` and `beatInBar` are only ever touched on the audio thread.
+/// the beat counters and the clicks playing are only ever touched on the audio thread.
 nonisolated final class ClickGenerator: @unchecked Sendable {
     private let sampleRate: Double
-    // Indexed by ClickSound.rawValue.
-    private let clicks: [[Float]]
-    private let accentClicks: [[Float]]
+    /// One sound's three clicks: ordinary beats, the downbeat, and every other beat.
+    struct Clicks: Sendable {
+        var normal, accent, alternate: [Float]
+    }
+
+    /// A newly chosen sound, waiting for the audio thread to pick it up on the next beat.
+    private let pendingClicks = Mutex<Clicks?>(nil)
     private let samplesPerBeat = Atomic<Int>(22_050)
-    private let soundIndex = Atomic<Int>(0)
     private let beatsPerBar = Atomic<Int>(4)
     private let isAccented = Atomic<Bool>(false)
     private let isPlaying = Atomic<Bool>(false)
     private let restartRequested = Atomic<Bool>(false)
     private let barRestartRequested = Atomic<Bool>(false)
-    // The latest downbeat: which beat it fell on, and how many bars had started by then.
-    private let latestDownbeat = Atomic<Int>(0)
-    private let barsStarted = Atomic<Int>(0)
     // Where the beat was at the start of the latest buffer, and when that buffer plays.
     private let phaseBits = Atomic<UInt64>(0)
     private let phaseHostTime = Atomic<UInt64>(0)
     private var framesSinceBeat = 0
     private var beatInBar = 0
     private var beatsSinceStart = 0
-    private var barsSinceStart = 0
+    // The sound in use, the click sounding now, and the one before ringing on underneath it.
+    private var clicks = Clicks(normal: [], accent: [], alternate: [])
+    private var click: [Float] = []
+    private var tail: [Float] = []
+    private var tailFrame = 0
 
     init(sampleRate: Double) {
         self.sampleRate = sampleRate
-        clicks = ClickSound.allCases.map { $0.samples(sampleRate: sampleRate, accented: false) }
-        accentClicks = ClickSound.allCases.map { $0.samples(sampleRate: sampleRate, accented: true) }
     }
 
     func setRate(_ clicksPerMinute: Double) {
         samplesPerBeat.store(max(Int(sampleRate * 60 / clicksPerMinute), 1), ordering: .relaxed)
     }
 
-    func setSound(_ sound: ClickSound) {
-        soundIndex.store(sound.rawValue, ordering: .relaxed)
+    func setClicks(_ clicks: Clicks) {
+        pendingClicks.withLock { $0 = clicks }
     }
 
     func setBar(beats: Int, accented: Bool) {
         beatsPerBar.store(beats, ordering: .relaxed)
         isAccented.store(accented, ordering: .relaxed)
         barRestartRequested.store(true, ordering: .releasing)
-    }
-
-    func bar(containingBeat beat: Int) -> Int {
-        let downbeat = latestDownbeat.load(ordering: .acquiring)
-        let bars = barsStarted.load(ordering: .relaxed)
-        let beats = max(beatsPerBar.load(ordering: .relaxed), 1)
-        // Counts back as well as forward, as the audio is rendered slightly ahead of being heard.
-        let offset = Double(beat - downbeat) / Double(beats)
-        return bars + Int(offset.rounded(.down))
     }
 
     func start() {
@@ -189,10 +231,9 @@ nonisolated final class ClickGenerator: @unchecked Sendable {
             framesSinceBeat = 0
             beatInBar = 0
             beatsSinceStart = 0
-            barsSinceStart = 0
             barRestartRequested.store(false, ordering: .relaxed)
-            barsStarted.store(0, ordering: .relaxed)
-            latestDownbeat.store(0, ordering: .releasing)
+            tail = []
+            click = nextClick(accented: isAccented.load(ordering: .relaxed))
         }
         let beatLength = samplesPerBeat.load(ordering: .relaxed)
 
@@ -200,11 +241,13 @@ nonisolated final class ClickGenerator: @unchecked Sendable {
         phaseBits.store(phase.bitPattern, ordering: .relaxed)
         phaseHostTime.store(hostTime, ordering: .releasing)
 
-        let sound = soundIndex.load(ordering: .relaxed)
         let beats = beatsPerBar.load(ordering: .relaxed)
         let accented = isAccented.load(ordering: .relaxed)
         for i in 0..<frameCount {
             if framesSinceBeat >= beatLength {
+                // Let a long sound ring on under the next click instead of cutting it off.
+                tail = click
+                tailFrame = framesSinceBeat
                 framesSinceBeat = 0
                 beatsSinceStart += 1
                 // A changed time signature starts a fresh bar on this click.
@@ -214,16 +257,25 @@ nonisolated final class ClickGenerator: @unchecked Sendable {
                     beatInBar += 1
                     if beatInBar >= beats { beatInBar = 0 }
                 }
-                if beatInBar == 0 {
-                    barsSinceStart += 1
-                    barsStarted.store(barsSinceStart, ordering: .relaxed)
-                    latestDownbeat.store(beatsSinceStart, ordering: .releasing)
-                }
+                click = nextClick(accented: accented)
             }
-            let click = accented && beatInBar == 0 ? accentClicks[sound] : clicks[sound]
-            out[i] = framesSinceBeat < click.count ? click[framesSinceBeat] : 0
+            var sample = framesSinceBeat < click.count ? click[framesSinceBeat] : 0
+            if tailFrame < tail.count {
+                sample += tail[tailFrame]
+                tailFrame += 1
+            }
+            out[i] = min(max(sample, -1), 1)
             framesSinceBeat += 1
         }
+    }
+
+    private func nextClick(accented: Bool) -> [Float] {
+        // Never wait on the main thread here: if it's mid-change, pick it up next beat.
+        if let chosen = pendingClicks.withLockIfAvailable({ pending in pending.take() }) ?? nil {
+            clicks = chosen
+        }
+        if accented && beatInBar == 0 { return clicks.accent }
+        return beatsSinceStart % 2 == 1 ? clicks.alternate : clicks.normal
     }
 }
 

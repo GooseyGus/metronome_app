@@ -27,9 +27,11 @@ final class Wobble {
     /// Set once every component has been knocked off in one go; swaps the
     /// running metronome for a dancer until RESET.
     private(set) var dancerUnlocked = false
-    /// When the dancer touches down after its first fall, for its landing animation.
+    /// When the dancer last touched down after a fall, for its landing animation.
     private(set) var dancerLandingTime: Date?
-    /// Everything's been cleared, but the title is still on its way off the screen.
+    /// When the dancer was last knocked off the screen, for its flailing as it tumbles.
+    private(set) var dancerFallTime: Date?
+    /// The title has been knocked off, but hasn't started dropping back yet.
     private var dancerPending = false
     private var taps: [Date] = []
     private var traits: [String: Traits] = [:]
@@ -79,7 +81,11 @@ final class Wobble {
         for (id, trait) in traits where falls[id] == nil && shaking >= trait.sturdiness {
             falls[id] = Fall(start: now)
             // The title is always the last to go, so it falling means everything has.
-            if fallsLast.contains(id) && !dancerUnlocked { dancerPending = true }
+            // Every time it falls, the dancer lands again on the way back.
+            if fallsLast.contains(id) {
+                dancerPending = true
+                if dancerUnlocked { dancerFallTime = now }
+            }
         }
         startAnimating()
     }
@@ -88,9 +94,17 @@ final class Wobble {
         dancerUnlocked = false
         dancerPending = false
         dancerLandingTime = nil
+        dancerFallTime = nil
     }
 
-    /// Swaps in the dancer only once the title has left the screen and starts dropping back.
+    /// How unsteady the dancers are: the current shiver, made stronger as shaking builds.
+    /// About 0.5 after a single tap, rising to about 3 with fast tapping.
+    func instability(at date: Date) -> Double {
+        ripple(at: date) * (0.4 + 0.3 * buildUp(at: date))
+    }
+
+    /// Swaps in the dancer only once the title has left the screen and starts dropping back,
+    /// and times its landing for when it touches down.
     private func revealDancerIfReturning(at now: Date) {
         guard let id = fallsLast.first else { return }
         let start = falls[id].map { returnStart(for: id, fall: $0) } ?? now

@@ -138,6 +138,8 @@ struct PopupCard<Content: View>: View {
     let subtitle: String?
     let palette: Palette
     let onDismiss: () -> Void
+    /// A small button at the right-hand end of the title.
+    var accessory: AnyView?
     @ViewBuilder let content: Content
     @Environment(\.uiScale) private var scale
     @State private var cardHeight: CGFloat = 0
@@ -154,6 +156,9 @@ struct PopupCard<Content: View>: View {
                         Text(title)
                             .font(.analogue(size: 16))
                             .tracking(3)
+                            .frame(maxWidth: .infinity)
+                            // Level with the title.
+                            .overlay(alignment: .trailing) { accessory }
                         if let subtitle {
                             Text(subtitle)
                                 .font(.analogue(size: 13))

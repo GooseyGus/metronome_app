@@ -49,6 +49,23 @@ struct PressButton<Label: View>: View {
     }
 }
 
+/// A small round ✕ for a corner, to remove something.
+struct DeleteBadge: View {
+    let palette: Palette
+
+    var body: some View {
+        ZStack {
+            Circle().fill(palette.stop)
+            Circle().strokeBorder(palette.background, lineWidth: 2)
+            // A cross from two rounded bars.
+            ForEach([45.0, -45.0], id: \.self) { angle in
+                Capsule().fill(palette.stopText).frame(width: 12, height: 2.5).rotationEffect(.degrees(angle))
+            }
+        }
+        .frame(width: 24, height: 24)
+    }
+}
+
 extension EnvironmentValues {
     /// How much bigger than iPhone size to draw controls: 1 on iPhone, up to 1.8 on iPad.
     @Entry var uiScale: CGFloat = 1
@@ -170,6 +187,7 @@ private struct GlyphShape: Shape {
 struct MetronomeGlyph: View {
     let metronome: Metronome
     let palette: Palette
+    let clicksPerMinute: Double
 
     private let maxSwing = 0.45
 
@@ -203,10 +221,18 @@ struct MetronomeGlyph: View {
                     with: .color(palette.text),
                     style: StrokeStyle(lineWidth: max(w * 0.05, 1.5), lineCap: .round)
                 )
-                let weight = CGRect(x: -w * 0.1, y: -armLength * 0.68, width: w * 0.2, height: h * 0.12)
+                // Like a real one, the weight slides down the arm for faster tempos.
+                let weight = CGRect(x: -w * 0.1, y: -armLength * weightHeight, width: w * 0.2, height: h * 0.12)
                 arm.fill(Path(roundedRect: weight, cornerRadius: h * 0.02), with: .color(palette.text))
             }
         }
         .accessibilityLabel("Metronome running")
+    }
+
+    /// How far up the arm the top of the weight sits: near the top at 30 clicks a minute
+    /// or slower, near the pivot at 300. Even steps per doubling, like a metronome's scale.
+    private var weightHeight: Double {
+        let t = min(max(log(clicksPerMinute / 30) / log(10), 0), 1)
+        return 0.92 - 0.55 * t
     }
 }
