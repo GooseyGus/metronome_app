@@ -44,6 +44,9 @@ struct RecordSoundView: View {
     /// A recording waiting for the user to confirm removing it.
     @State private var slotToClear: Slot?
     @State private var isConfirmingDelete = false
+    @State private var isConfirmingDiscard = false
+    /// What the menu opened with, to tell whether anything's changed.
+    private let original: Existing?
     @State private var sharePrompt: SharePrompt?
     @FocusState private var isNameFocused: Bool
 
@@ -56,7 +59,8 @@ struct RecordSoundView: View {
         self.onSave = onSave
         self.onCancel = onCancel
         self.onDelete = onDelete
-        title = existing == nil ? "NEW SOUND" : "EDIT SOUND"
+        title = existing == nil ? "NEW" : "EDIT"
+        original = existing
         _name = State(initialValue: existing?.name ?? defaultName)
         _beat = State(initialValue: existing?.beat)
         _downbeat = State(initialValue: existing?.downbeat)
@@ -64,15 +68,27 @@ struct RecordSoundView: View {
     }
 
     var body: some View {
-        // Tapping outside does nothing, so a stray tap can't throw away a recording.
         let isShared = if case .shared = sharePrompt { true } else { false }
-        let isMainScreen = !isRenaming && !isConfirmingDelete && sharePrompt == nil && slotToClear == nil
+        let isMainScreen = !isRenaming && !isConfirmingDelete && !isConfirmingDiscard
+            && sharePrompt == nil && slotToClear == nil
         PopupCard(
             // Once shared, the card is just the news, without the menu's own title above it.
-            title: isShared ? "SHARED \(name.uppercased())" : title, subtitle: nil, palette: palette, onDismiss: {},
+            // Asking to delete, discard or remove, the question stands alone.
+            title: isShared ? "SHARED \(name.uppercased())"
+                : isConfirmingDelete || isConfirmingDiscard || slotToClear != nil ? "" : title,
+            subtitle: nil, palette: palette,
+            // Tapping outside closes it, the same as CANCEL (or backs out of asking to discard).
+            onDismiss: { if isConfirmingDiscard { isConfirmingDiscard = false } else { requestCancel() } },
             accessory: isMainScreen ? AnyView(shareButton) : nil
         ) {
-            if isRenaming {
+            if isConfirmingDiscard {
+                prompt("DISCARD CHANGES?")
+                Text("Your recordings won't be saved.").font(.analogue(size: 13)).opacity(0.6)
+                HStack(spacing: 10) {
+                    cardButton("CANCEL") { isConfirmingDiscard = false }
+                    cardButton("OKAY", isLit: true, action: onCancel)
+                }
+            } else if isRenaming {
                 renamer
             } else if isConfirmingDelete {
                 prompt("DELETE \(name.uppercased())?")
@@ -87,12 +103,15 @@ struct RecordSoundView: View {
                 // No warning that it's permanent: CANCEL on the whole sound still gets it back.
                 let samples = (slotToClear == .beat ? beat : downbeat) ?? []
                 prompt("REMOVE THE \(slotToClear == .beat ? "BEAT" : "DOWNBEAT")?")
-                Waveform(levels: Waveform.levels(of: samples), color: palette.text)
+                Waveform(
+                    levels: Waveform.levels(of: samples), color: palette.text,
+                    playhead: recorder.playhead(for: "clear"), playheadColor: palette.start
+                )
                     .padding(.horizontal, 8)
                     .frame(height: 56)
                     .editableHighlight(palette.text)
                     .contentShape(Rectangle())
-                    .onTapGesture { recorder.play(samples, recordedAt: sampleRate ?? recorder.sampleRate) }
+                    .onTapGesture { recorder.play(samples, recordedAt: sampleRate ?? recorder.sampleRate, tag: "clear") }
                     .accessibilityLabel("Recording. Tap to hear it")
                 HStack(spacing: 10) {
                     cardButton("CANCEL") { self.slotToClear = nil }
@@ -107,14 +126,17 @@ struct RecordSoundView: View {
                 requirements
                 slot(.beat)
                 slot(.downbeat)
-                Text(recorder.status.message)
+                // The recorder's news, or else a hint at what's next.
+                let message = recorder.status.message
+                Text(message.isEmpty ? hint : message)
                     .font(.analogue(size: 12))
                     .tracking(1)
                     .multilineTextAlignment(.center)
                     .foregroundStyle(recorder.status.isWarning ? palette.start : palette.text)
+                    .opacity(message.isEmpty ? 0.5 : 1)
                     .frame(height: 30)
                 HStack(spacing: 10) {
-                    cardButton("CANCEL", action: onCancel)
+                    cardButton("CANCEL", action: requestCancel)
                     cardButton("SAVE", isLit: true, isEnabled: beat != nil) {
                         if let beat { onSave(name, beat, downbeat, sampleRate ?? recorder.sampleRate) }
                     }
@@ -131,6 +153,33 @@ struct RecordSoundView: View {
         .onDisappear { recorder.shutdown() }
     }
 
+    /// Whether there are recordings that would be lost. A new name alone doesn't count.
+    private var hasUnsavedRecordings: Bool {
+        beat != original?.beat || downbeat != original?.downbeat
+    }
+
+    private var hint: String {
+        if beat == nil { return "RECORD A BEAT TO SAVE" }
+        if let original, !hasUnsavedRecordings, name == original.name { return "NO CHANGES MADE" }
+        return original == nil ? "TAP SAVE TO KEEP IT" : "TAP SAVE TO KEEP YOUR CHANGES"
+    }
+
+    /// Closes, first checking about throwing away any recordings.
+    private func requestCancel() {
+        recorder.cancel()
+        recorder.stopPlaying()
+        listeningFor = nil
+        if hasUnsavedRecordings {
+            isRenaming = false
+            isConfirmingDelete = false
+            sharePrompt = nil
+            slotToClear = nil
+            isConfirmingDiscard = true
+        } else {
+            onCancel()
+        }
+    }
+
     private func prompt(_ text: String) -> some View {
         Text(text)
             .font(.analogue(size: 16))
@@ -145,6 +194,8 @@ struct RecordSoundView: View {
             Image(systemName: "square.and.arrow.up")
                 .font(.system(size: 17, weight: .semibold))
                 .frame(width: 32, height: 32)
+                // The arrow pokes up out of the box, so lift it to sit level with the title.
+                .offset(x: 6, y: -4)
         }
         .accessibilityLabel("Share this sound")
     }
@@ -198,13 +249,10 @@ struct RecordSoundView: View {
 
     private var nameButton: some View {
         PressButton(action: startRenaming) {
-            VStack(spacing: 6) {
-                Text("NAME").font(.analogue(size: 11)).tracking(2).opacity(0.6)
-                CapText(text: name.uppercased(), size: 22, tracking: 1)
-            }
-            .padding(.vertical, 10)
-            .frame(maxWidth: .infinity)
-            .editableHighlight(palette.text)
+            CapText(text: name.uppercased(), size: 22, tracking: 1)
+                .padding(.vertical, 14)
+                .frame(maxWidth: .infinity)
+                .editableHighlight(palette.text)
         }
         .accessibilityLabel("Name, \(name). Tap to rename")
     }
@@ -298,11 +346,20 @@ struct RecordSoundView: View {
         let isListening = listeningFor == slot
         // The downbeat waits for the beat (unless it's already recorded).
         let isEnabled = slot == .beat || beat != nil || downbeat != nil
+        let tag = slot == .beat ? "beat" : "downbeat"
 
         return VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 8) {
                 Text(slot == .beat ? "BEAT" : "DOWNBEAT").font(.analogue(size: 14)).tracking(2)
-                if slot == .downbeat {
+                // Marks what discarding would lose: a new take, or one taken away.
+                let saved = slot == .beat ? original?.beat : original?.downbeat
+                if samples != saved {
+                    if samples != nil {
+                        Text("NEW").font(.analogue(size: 11)).tracking(1).foregroundStyle(.green)
+                    } else {
+                        Text("DELETED").font(.analogue(size: 11)).tracking(1).foregroundStyle(.red)
+                    }
+                } else if slot == .downbeat {
                     Text("OPTIONAL").font(.analogue(size: 11)).tracking(1).opacity(0.6)
                 }
             }
@@ -311,7 +368,10 @@ struct RecordSoundView: View {
                     if isListening {
                         Waveform(levels: recorder.levels, color: palette.text)
                     } else if let samples {
-                        Waveform(levels: Waveform.levels(of: samples), color: palette.text)
+                        Waveform(
+                            levels: Waveform.levels(of: samples), color: palette.text,
+                            playhead: recorder.playhead(for: tag), playheadColor: palette.start
+                        )
                     } else {
                         Text(slot == .beat ? "TAP REC TO START" : isEnabled ? "TAP REC TO ADD" : "RECORD THE BEAT FIRST")
                             .font(.analogue(size: 11))
@@ -325,15 +385,17 @@ struct RecordSoundView: View {
                 .editableHighlight(palette.text)
                 .contentShape(Rectangle())
                 .onTapGesture {
-                    if let samples, !isListening { recorder.play(samples, recordedAt: sampleRate ?? recorder.sampleRate) }
+                    if let samples, !isListening {
+                        recorder.play(samples, recordedAt: sampleRate ?? recorder.sampleRate, tag: tag)
+                    }
                 }
                 .accessibilityLabel(samples == nil ? "Empty" : "Recorded. Tap to hear it")
-                .overlay(alignment: .topLeading) {
+                .overlay(alignment: .topTrailing) {
                     if samples != nil && !isListening {
                         PressButton(action: { slotToClear = slot }) {
                             DeleteBadge(palette: palette)
                         }
-                        .offset(x: -8, y: -8)
+                        .offset(x: 8, y: -8)
                         .accessibilityLabel("Remove recording")
                     }
                 }
@@ -377,7 +439,7 @@ struct RecordSoundView: View {
                 }
                 if slot == .beat { beat = samples } else { downbeat = samples }
                 listeningFor = nil
-                recorder.play(samples, recordedAt: sampleRate ?? recorder.sampleRate)
+                recorder.play(samples, recordedAt: sampleRate ?? recorder.sampleRate, tag: slot == .beat ? "beat" : "downbeat")
             }
             // Couldn't start (no microphone access): nothing is listening.
             if !recorder.isListening && recorder.status != .accepted { listeningFor = nil }
@@ -404,8 +466,8 @@ private struct CardButton: View {
     var isDestructive = false
 
     var body: some View {
-        let fill = isDestructive ? palette.stop : isLit ? palette.start : palette.control
-        let ink = isDestructive ? palette.stopText : isLit ? palette.startText : palette.controlText
+        let fill = isLit ? palette.start : palette.control
+        let ink = isDestructive ? Color.red : isLit ? palette.startText : palette.controlText
         RoundedRectangle(cornerRadius: 12)
             .fill(fill)
             .frame(height: 48)
@@ -427,10 +489,10 @@ private struct SoundSummary: View {
 
     var body: some View {
         VStack(spacing: 10) {
-            CapText(text: name.uppercased(), size: 22, tracking: 1)
-                .padding(.vertical, 10)
+            // Plain, with no box, since it can't be changed here.
+            CapText(text: name.uppercased(), size: 28, tracking: 1)
                 .frame(maxWidth: .infinity)
-                .editableHighlight(palette.text)
+                .padding(.bottom, 6)
             row("BEAT", beat)
             if let downbeat { row("DOWNBEAT", downbeat) }
             // Coloured like START/STOP: lit to play, the stop colour while it loops.
@@ -453,15 +515,40 @@ private struct SoundSummary: View {
     private func row(_ label: String, _ samples: [Float]) -> some View {
         HStack(spacing: 10) {
             Text(label).font(.analogue(size: 11)).tracking(2).frame(width: 72, alignment: .leading)
-            Waveform(levels: Waveform.levels(of: samples), color: palette.text)
+            Waveform(
+                levels: Waveform.levels(of: samples), color: palette.text,
+                playhead: playhead(label, samples), playheadColor: palette.start
+            )
                 .padding(.horizontal, 8)
                 .frame(height: 44)
                 .editableHighlight(palette.text)
                 .contentShape(Rectangle())
-                .onTapGesture { player.play(samples, recordedAt: sampleRate) }
+                .onTapGesture { player.play(samples, recordedAt: sampleRate, tag: label) }
                 .accessibilityLabel("\(label.lowercased()). Tap to hear it")
         }
     }
+
+    /// Where a row's playhead is: its own playback, or each of its clicks in the preview.
+    private func playhead(_ label: String, _ samples: [Float]) -> ((Date) -> Double?)? {
+        guard let playback = player.playback else { return nil }
+        let clickLength = Double(samples.count) / sampleRate
+        if playback.tag == label {
+            return { date in playback.elapsed(at: date).map { $0 / clickLength } }
+        }
+        guard playback.tag == Self.previewTag else { return nil }
+        let isDownbeatRow = downbeat != nil && label == "DOWNBEAT"
+        let beatLength = 60 / bpm
+        return { date in
+            guard let time = playback.elapsed(at: date) else { return nil }
+            let index = Int(time / beatLength)
+            // The first beat of the bar plays the downbeat, when there is one.
+            guard (index == 0 && downbeat != nil) == isDownbeatRow else { return nil }
+            let into = time - Double(index) * beatLength
+            return into < clickLength ? into / clickLength : nil
+        }
+    }
+
+    private static let previewTag = "PREVIEW"
 
     /// Loops a bar of 4/4 at 120 BPM, or stops it.
     private func togglePreview() {
@@ -469,7 +556,7 @@ private struct SoundSummary: View {
             player.stopPlaying()
         } else {
             player.play(Self.bar(beat: beat, downbeat: downbeat, beatsPerSecond: bpm / 60, sampleRate: sampleRate),
-                        recordedAt: sampleRate, loops: true)
+                        recordedAt: sampleRate, loops: true, tag: Self.previewTag)
         }
     }
 
@@ -523,6 +610,9 @@ struct ImportSoundView: View {
 private struct Waveform: View {
     let levels: [Float]
     let color: Color
+    /// How far through the sound is playing (0 to 1) at a moment, or nil when it isn't.
+    var playhead: ((Date) -> Double?)?
+    var playheadColor: Color = .clear
 
     /// A recording's loudness in 60 slices.
     static func levels(of samples: [Float]) -> [Float] {
@@ -534,6 +624,24 @@ private struct Waveform: View {
     }
 
     var body: some View {
+        TimelineView(.animation(paused: playhead == nil)) { timeline in
+            let progress = playhead?(timeline.date)
+            bars
+                .overlay(alignment: .leading) {
+                    // A thin line passing across as the sound plays.
+                    if let progress {
+                        GeometryReader { geometry in
+                            Capsule()
+                                .fill(playheadColor)
+                                .frame(width: 2)
+                                .offset(x: min(max(progress, 0), 1) * (geometry.size.width - 2))
+                        }
+                    }
+                }
+        }
+    }
+
+    private var bars: some View {
         Canvas { context, size in
             guard !levels.isEmpty else { return }
             let step = size.width / CGFloat(levels.count)

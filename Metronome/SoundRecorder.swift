@@ -30,6 +30,23 @@ final class SoundRecorder {
         }
     }
 
+    /// What's playing back, for drawing a playhead across its waveform.
+    struct Playback {
+        /// Which waveform it belongs to, as named by whoever played it.
+        let tag: String
+        /// When the first sample reaches the speaker.
+        let start: Date
+        let duration: TimeInterval
+        let loops: Bool
+
+        /// Seconds into the sound (into the current loop, if looping), or nil once it's over.
+        func elapsed(at date: Date) -> TimeInterval? {
+            let time = date.timeIntervalSince(start)
+            if loops { return max(time, 0).truncatingRemainder(dividingBy: duration) }
+            return time < duration ? max(time, 0) : nil
+        }
+    }
+
     static let historyLength = 90
 
     private(set) var status = Status.idle
@@ -38,6 +55,9 @@ final class SoundRecorder {
     private(set) var sampleRate = 48_000.0
     /// Whether a preview is playing round and round (until `stopPlaying`).
     private(set) var isLooping = false
+    private(set) var playback: Playback?
+    /// Counts plays, so a finished one doesn't clear a newer one's playback.
+    private var playCount = 0
     var isListening: Bool { detector?.isArmed == true }
 
     private var engine: AVAudioEngine?
@@ -83,7 +103,8 @@ final class SoundRecorder {
     }
 
     /// Plays samples once, or with `loops`, over and over until stopped.
-    func play(_ samples: [Float], recordedAt rate: Double, loops: Bool = false) {
+    /// `tag` names the waveform it belongs to, for its playhead.
+    func play(_ samples: [Float], recordedAt rate: Double, loops: Bool = false, tag: String = "") {
         guard !samples.isEmpty,
               let format = AVAudioFormat(standardFormatWithSampleRate: rate, channels: 1),
               let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(samples.count))
@@ -106,11 +127,32 @@ final class SoundRecorder {
         previewPlayer.scheduleBuffer(buffer, at: nil, options: loops ? .loops : [])
         previewPlayer.play()
         isLooping = loops
+
+        let session = AVAudioSession.sharedInstance()
+        let duration = Double(samples.count) / rate
+        playCount += 1
+        playback = Playback(
+            tag: tag, start: Date().addingTimeInterval(session.outputLatency + session.ioBufferDuration),
+            duration: duration, loops: loops
+        )
+        guard !loops else { return }
+        let count = playCount
+        Task { [weak self] in
+            try? await Task.sleep(for: .seconds(duration + 0.2))
+            if self?.playCount == count { self?.playback = nil }
+        }
+    }
+
+    /// A playhead for the waveform named `tag`, while it's the one playing.
+    func playhead(for tag: String) -> ((Date) -> Double?)? {
+        guard let playback, playback.tag == tag else { return nil }
+        return { date in playback.elapsed(at: date).map { $0 / playback.duration } }
     }
 
     func stopPlaying() {
         previewPlayer.stop()
         isLooping = false
+        playback = nil
     }
 
     /// Turns the microphone off and puts the audio back how the metronome likes it.
@@ -182,15 +224,26 @@ final class SoundRecorder {
         status = new
     }
 
-    /// Fades the very ends so it never clicks, and brings it up to full volume.
+    /// Cuts the quiet before the sound, fades the very ends so it never clicks, and
+    /// brings it up to full volume.
     private static func tidy(_ samples: [Float], sampleRate: Double) -> [Float] {
-        let fadeIn = Int(sampleRate * 0.002), fadeOut = Int(sampleRate * 0.02)
+        let fadeOut = Int(sampleRate * 0.02)
         let peak = max(samples.map(abs).max() ?? 1, 0.001)
-        return samples.enumerated().map { i, sample in
-            let start = min(Float(i) / Float(fadeIn), 1)
+        let loud = samples.enumerated().map { i, sample in
             let end = min(Float(samples.count - i) / Float(fadeOut), 1)
-            return sample / peak * 0.98 * start * end
+            return sample / peak * 0.98 * end
         }
+        return trimmingLeadingQuiet(loud, sampleRate: sampleRate)
+    }
+
+    /// Starts a click right as it gets loud, so it lands on the beat rather than a
+    /// moment after. Keeps a millisecond before, faded in, to soften the attack.
+    static func trimmingLeadingQuiet(_ samples: [Float], sampleRate: Double) -> [Float] {
+        let peak = samples.map(abs).max() ?? 0
+        guard peak > 0, let first = samples.firstIndex(where: { abs($0) >= peak * 0.1 }) else { return samples }
+        let fadeIn = max(Int(sampleRate * 0.001), 1)
+        let start = max(first - fadeIn, 0)
+        return samples[start...].enumerated().map { i, sample in sample * min(Float(i) / Float(fadeIn), 1) }
     }
 }
 

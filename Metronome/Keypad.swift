@@ -152,17 +152,20 @@ struct PopupCard<Content: View>: View {
                     .onTapGesture(perform: onDismiss)
 
                 VStack(spacing: 16) {
-                    VStack(spacing: 4) {
-                        Text(title)
-                            .font(.analogue(size: 16))
-                            .tracking(3)
-                            .frame(maxWidth: .infinity)
-                            // Level with the title.
-                            .overlay(alignment: .trailing) { accessory }
-                        if let subtitle {
-                            Text(subtitle)
-                                .font(.analogue(size: 13))
-                                .opacity(0.6)
+                    // An empty title leaves the card to its content, with no gap above.
+                    if !title.isEmpty {
+                        VStack(spacing: 4) {
+                            Text(title)
+                                .font(.analogue(size: 16))
+                                .tracking(3)
+                                .frame(maxWidth: .infinity)
+                                // Level with the title.
+                                .overlay(alignment: .trailing) { accessory }
+                            if let subtitle {
+                                Text(subtitle)
+                                    .font(.analogue(size: 13))
+                                    .opacity(0.6)
+                            }
                         }
                     }
                     content

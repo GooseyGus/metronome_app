@@ -16,9 +16,6 @@ struct ContentView: View {
     @State private var partnerLandingTime: Date?
     @State private var customSounds = CustomSounds()
     @State private var isRecordingSound = false
-    /// Holding a recorded sound makes them all wiggle, ready to delete.
-    @State private var isEditingSounds = false
-    @State private var editingSoundsSince = Date.distantPast
     /// How much to enlarge pop-ups, matching the controls (bigger on iPad).
     @State private var popupScale: CGFloat = 1
     @State private var soundToEdit: CustomSound?
@@ -133,14 +130,6 @@ struct ContentView: View {
             }
 
             ZStack {
-                // While sounds wiggle, tapping any empty space stops them.
-                if isEditingSounds {
-                    Color.clear
-                        .contentShape(Rectangle())
-                        .ignoresSafeArea()
-                        .onTapGesture { isEditingSounds = false }
-                }
-
                 Group {
                     if isLandscape {
                         HStack(spacing: 16) {
@@ -165,12 +154,6 @@ struct ContentView: View {
             .environment(\.uiScale, m.scale)
             .onChange(of: m.scale, initial: true) { popupScale = m.scale }
         }
-        // While sounds wiggle, any tap (buttons included) stops them.
-        .simultaneousGesture(TapGesture().onEnded {
-            if isEditingSounds && Date().timeIntervalSince(editingSoundsSince) > 0.4 {
-                isEditingSounds = false
-            }
-        })
         // The keyboard (for naming a sound) floats over the controls instead of squashing
         // them; the pop-up, laid over the top, still moves up out of its way.
         .ignoresSafeArea(.keyboard)
@@ -396,6 +379,7 @@ struct ContentView: View {
                         .fill(palette.text.opacity(0.3))
                         .frame(width: 2)
                         .padding(.vertical, 8)
+                        .wobbly("soundDivider")
                     ForEach(customSounds.all) { custom in
                         customSoundTile(custom, minWidth: tileWidth)
                             .id(SoundChoice.custom(custom.id).rawValue)
@@ -422,7 +406,6 @@ struct ContentView: View {
 
     /// Like `tile`, but sized to fit its name and selected on release, so dragging
     /// across the row scrolls it instead of picking whatever the finger landed on.
-    /// While deleting, tapping any sound finishes instead.
     /// `isRecorded` marks the user's own sounds with a small dot, like a recording light.
     private func soundTile(
         _ title: String, isOn: Bool, isRecorded: Bool = false, minWidth: CGFloat, action: @escaping () -> Void
@@ -440,61 +423,24 @@ struct ContentView: View {
         .frame(minWidth: minWidth, maxHeight: .infinity)
         .background(RoundedRectangle(cornerRadius: 12).fill(isOn ? palette.start : palette.control))
         .contentShape(Rectangle())
-        .onTapGesture {
-            // Ignore the finger lifting from the hold that started editing.
-            if isEditingSounds {
-                if Date().timeIntervalSince(editingSoundsSince) > 0.4 { isEditingSounds = false }
-            } else {
-                action()
-            }
-        }
+        .onTapGesture(perform: action)
         .accessibilityAddTraits(isOn ? [.isButton, .isSelected] : .isButton)
     }
 
-    /// A recorded sound. Holding it shows a border, a wiggle and an edit badge on every recorded sound.
+    /// A recorded sound. Holding it or double tapping it opens it for editing.
     private func customSoundTile(_ custom: CustomSound, minWidth: CGFloat) -> some View {
         let choice = SoundChoice.custom(custom.id)
         return soundTile(custom.name.uppercased(), isOn: soundChoice == choice, isRecorded: true, minWidth: minWidth) {
             soundChoice = choice
         }
-        // A short hold or a double tap starts deleting and editing.
-        .onLongPressGesture(minimumDuration: 0.15, perform: startEditingSounds) { isPressing in
-            // Lifting the finger after the hold shouldn't count as a tap that stops it.
-            if !isPressing && isEditingSounds { editingSoundsSince = Date() }
-        }
-        .simultaneousGesture(TapGesture(count: 2).onEnded(startEditingSounds))
-        .overlay {
-            if isEditingSounds {
-                RoundedRectangle(cornerRadius: 12).strokeBorder(palette.text, lineWidth: 2)
-            }
-        }
-        .overlay(alignment: .topTrailing) {
-            if isEditingSounds {
-                PressButton(action: {
-                    isEditingSounds = false
-                    if isRunning { toggleRunning() }
-                    soundToEdit = custom
-                }) {
-                    ZStack {
-                        Circle().fill(palette.start)
-                        Circle().strokeBorder(palette.background, lineWidth: 2)
-                        Image(systemName: "pencil")
-                            .font(.system(size: 11, weight: .bold))
-                            .foregroundStyle(palette.startText)
-                    }
-                    .frame(width: 24, height: 24)
-                }
-                .offset(x: 8, y: -8)
-                .accessibilityLabel("Edit \(custom.name)")
-            }
-        }
-        .modifier(Wiggle(isOn: isEditingSounds, seed: custom.id.hashValue))
-        .accessibilityAction(named: "Edit") { soundToEdit = custom }
+        .onLongPressGesture(minimumDuration: 0.15) { edit(custom) }
+        .simultaneousGesture(TapGesture(count: 2).onEnded { edit(custom) })
+        .accessibilityAction(named: "Edit") { edit(custom) }
     }
 
-    private func startEditingSounds() {
-        isEditingSounds = true
-        editingSoundsSince = Date()
+    private func edit(_ custom: CustomSound) {
+        if isRunning { toggleRunning() }
+        soundToEdit = custom
     }
 
     /// A faint box with a plus, for recording a new sound.
@@ -509,7 +455,6 @@ struct ContentView: View {
         .editableHighlight(palette.text)
         .contentShape(Rectangle())
         .onTapGesture {
-            isEditingSounds = false
             if isRunning { toggleRunning() }
             isRecordingSound = true
         }
@@ -673,7 +618,6 @@ struct ContentView: View {
         customSounds.delete(custom.id)
         if soundChoice == .custom(custom.id) { soundChoice = .builtIn(.classic) }
         soundToEdit = nil
-        if customSounds.all.isEmpty { isEditingSounds = false }
     }
 
     private func toggleRunning() {
@@ -751,19 +695,6 @@ struct ContentView: View {
 
     private func clamped(_ value: Int, to range: ClosedRange<Int>) -> Int {
         min(max(value, range.lowerBound), range.upperBound)
-    }
-}
-
-/// Rocks a view gently from side to side, like an app icon waiting to be deleted.
-private struct Wiggle: ViewModifier {
-    let isOn: Bool
-    let seed: Int
-
-    func body(content: Content) -> some View {
-        TimelineView(.animation(paused: !isOn)) { context in
-            let t = context.date.timeIntervalSinceReferenceDate
-            content.rotationEffect(.degrees(isOn ? 2 * sin(t * 22 + Double(seed % 100)) : 0))
-        }
     }
 }
 

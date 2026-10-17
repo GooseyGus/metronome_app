@@ -103,7 +103,10 @@ final class CustomSounds {
     func samples(for id: UUID) -> (beat: [Float], downbeat: [Float]?)? {
         if let cached = samples[id] { return cached }
         guard let sound = sound(id), let beat = read(file(for: id, downbeat: false)) else { return nil }
-        let loaded = (beat, sound.hasDownbeat ? read(file(for: id, downbeat: true)) : nil)
+        let downbeat = sound.hasDownbeat ? read(file(for: id, downbeat: true)) : nil
+        // Sounds recorded before quiet starts were cut get the same treatment here.
+        let trim = { SoundRecorder.trimmingLeadingQuiet($0, sampleRate: sound.sampleRate) }
+        let loaded = (trim(beat), downbeat.map(trim))
         samples[id] = loaded
         return loaded
     }
@@ -208,7 +211,8 @@ struct SharedSound: Codable {
         else { return nil }
         var name = String(sound.name.uppercased().prefix(CustomSounds.maxNameLength)).trimmingCharacters(in: .whitespaces)
         if name.isEmpty || !SoundName.isFriendly(name) { name = "SHARED SOUND" }
-        return SharedSound(name: name, beat: sound.beat, downbeat: sound.downbeat, sampleRate: sound.sampleRate)
+        let trim = { SoundRecorder.trimmingLeadingQuiet($0, sampleRate: sound.sampleRate) }
+        return SharedSound(name: name, beat: trim(sound.beat), downbeat: sound.downbeat.map(trim), sampleRate: sound.sampleRate)
     }
 
     private static func pack(_ samples: [Float]) -> Data {
