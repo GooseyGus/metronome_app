@@ -393,8 +393,9 @@ struct ContentView: View {
                 }
             }
             // Let knocked-off tiles tumble down the screen rather than vanish at the
-            // row's edge, and leave room for the delete badges.
+            // row's edge, but stop the row at its sides, level with the other columns.
             .scrollClipDisabled()
+            .clipShape(SidesOnly())
             .onAppear { proxy.scrollTo(soundChoice.rawValue, anchor: .center) }
             .onChange(of: soundRowTarget) {
                 guard let soundRowTarget else { return }
@@ -695,6 +696,13 @@ struct ContentView: View {
 
     private func clamped(_ value: Int, to range: ClosedRange<Int>) -> Int {
         min(max(value, range.lowerBound), range.upperBound)
+    }
+}
+
+/// Clips at the left and right edges only, leaving the top and bottom open.
+private struct SidesOnly: Shape {
+    func path(in rect: CGRect) -> Path {
+        Path(CGRect(x: rect.minX, y: rect.minY - 10_000, width: rect.width, height: rect.height + 20_000))
     }
 }
 
