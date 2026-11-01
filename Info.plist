@@ -48,6 +48,9 @@
 			</array>
 		</dict>
 	</array>
+	<!-- Uses no encryption beyond Apple's own, so App Store uploads skip the export-compliance question. -->
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
 	<key>LSSupportsOpeningDocumentsInPlace</key>
 	<false/>
 </dict>

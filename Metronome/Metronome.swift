@@ -32,16 +32,28 @@ final class Metronome {
         generator = ClickGenerator(sampleRate: format.sampleRate)
         source = AVAudioSourceNode(format: format, renderBlock: generator.makeRenderBlock())
         engine.attach(source)
-        try? engine.connectNode(source, to: engine.mainMixerNode, format: format)
+        if #available(iOS 27, *) {
+            try? engine.connectNode(source, to: engine.mainMixerNode, format: format)
+        } else {
+            engine.connect(source, to: engine.mainMixerNode, format: format)
+        }
 
         let center = NotificationCenter.default
         // A phone call, alarm or Siri takes over the audio: stop and let the UI know.
-        observers.append(center.addObserver(forName: AVAudioSession.didBecomeInactiveNotification, object: session, queue: .main) { [weak self] _ in
+        let interrupted: (Notification) -> Void = { [weak self] _ in
             MainActor.assumeIsolated {
                 self?.stop()
                 self?.onInterruption()
             }
-        })
+        }
+        if #available(iOS 27, *) {
+            observers.append(center.addObserver(forName: AVAudioSession.didBecomeInactiveNotification, object: session, queue: .main, using: interrupted))
+        } else {
+            observers.append(center.addObserver(forName: AVAudioSession.interruptionNotification, object: session, queue: .main) { notification in
+                let type = notification.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt
+                if type == AVAudioSession.InterruptionType.began.rawValue { interrupted(notification) }
+            })
+        }
         // Plugging in or removing headphones stops the engine; restart it if we were playing.
         observers.append(center.addObserver(forName: .AVAudioEngineConfigurationChange, object: engine, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated {
@@ -97,8 +109,14 @@ final class Metronome {
         let session = AVAudioSession.sharedInstance()
         try? session.setCategory(.playback, options: .mixWithOthers)
         // Activate asynchronously; the synchronous setActive can block the main thread.
-        session.activate { success, error in
-            if !success { print("Failed to activate audio session: \(String(describing: error))") }
+        if #available(iOS 27, *) {
+            session.activate { success, error in
+                if !success { print("Failed to activate audio session: \(String(describing: error))") }
+            }
+        } else {
+            DispatchQueue.global(qos: .userInitiated).async {
+                do { try session.setActive(true) } catch { print("Failed to activate audio session: \(error)") }
+            }
         }
     }
 

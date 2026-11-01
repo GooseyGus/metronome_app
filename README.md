@@ -53,6 +53,7 @@ To run on your own device, choose your Apple ID under *Signing & Capabilities*, 
 | `Keypad.swift` | The pop-up number pad and note-value picker |
 | `Palette.swift` | The colour palettes |
 | `Wobble.swift`, `Dancer.swift` | You'll see |
+| `tools/make-icon.swift` | Draws the app icon: `swift tools/make-icon.swift Metronome/Assets.xcassets/AppIcon.appiconset` |
 
 ## Easter egg
 
