@@ -67,8 +67,9 @@ bpm,tempo,beat,click,tap,rhythm,drum,practice,music,piano,guitar,band,timing,cou
 
 ## Screenshots
 
-- 6.9" iPhone: `appstore/screenshots/iphone/`
-- 13" iPad: `appstore/screenshots/ipad/`
+- iPhone with Dynamic Island, medium display (required): `appstore/screenshots/iphone-6.3/`
+- iPhone with Dynamic Island, large display (optional): `appstore/screenshots/iphone/`
+- iPad 13" (required): `appstore/screenshots/ipad/`
 
 ## App Review notes
 
