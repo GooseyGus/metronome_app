@@ -6,6 +6,7 @@ nonisolated enum ClickSound: Int, CaseIterable, Identifiable {
     // the order here is the order they appear in.
     case classic = 0, wood = 1, woodblock = 9, jamBlock = 10, agogo = 11, shaker = 12
     case electric = 2, clave = 3, marimba = 4, snap = 5, clap = 6, cowbell = 7, hiHat = 8
+    case timVine = 13
 
     /// Which click to play: the downbeat (with a time signature on), or an ordinary
     /// beat, every other one of which is `alternate`, for sounds that go tick-tock.
@@ -30,6 +31,7 @@ nonisolated enum ClickSound: Int, CaseIterable, Identifiable {
         case .clap: "Clap"
         case .cowbell: "Cowbell"
         case .hiHat: "Hi-hat"
+        case .timVine: "Tim Vine"
         }
     }
 
@@ -74,7 +76,7 @@ nonisolated enum ClickSound: Int, CaseIterable, Identifiable {
     /// How hard each sound is saturated: plenty for clicks, very little for tuned ones.
     private var drive: Double {
         switch self {
-        case .classic, .wood, .woodblock, .jamBlock, .agogo, .shaker, .electric: 2.5
+        case .classic, .timVine, .wood, .woodblock, .jamBlock, .agogo, .shaker, .electric: 2.5
         case .snap, .clap: 2
         case .clave: 1.8
         case .cowbell: 1.6
@@ -82,6 +84,9 @@ nonisolated enum ClickSound: Int, CaseIterable, Identifiable {
         case .marimba: 1.1
         }
     }
+
+    /// Sounds whose tempo creeps up while they play, a beat per minute at a time.
+    var speedsUp: Bool { self == .timVine }
 
     private func render(sampleRate: Double, variant: Variant) -> [Double] {
         // Accented downbeats are pitched up a fifth, unless the sound says otherwise.
@@ -96,6 +101,9 @@ nonisolated enum ClickSound: Int, CaseIterable, Identifiable {
         case .classic:
             // A short decaying sine tick.
             return samples(0.06) { t in tone(1_500 * pitch, t) * exp(-t * 90) }
+        case .timVine:
+            // Classic's tick; what makes it Tim Vine is that it keeps speeding up.
+            return ClickSound.classic.render(sampleRate: sampleRate, variant: variant)
         // Normally recorded; if a file's missing, the nearest synthesised sound stands in.
         case .woodblock, .jamBlock:
             return ClickSound.wood.render(sampleRate: sampleRate, variant: variant)

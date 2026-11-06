@@ -22,6 +22,8 @@ struct ContentView: View {
     /// A shared sound that's been opened, waiting to be imported.
     @State private var soundToImport: SharedSound?
     @State private var importProblem: ImportProblem?
+    @State private var isShowingAbout = false
+    @Environment(\.openURL) private var openURL
     /// Set to scroll the sound row, e.g. to a newly recorded sound.
     @State private var soundRowTarget: String?
     @Environment(\.scenePhase) private var scenePhase
@@ -44,6 +46,13 @@ struct ContentView: View {
         .init(value: 16, name: "16th"), .init(value: 32, name: "32nd"),
         .init(value: 64, name: "64th"),
     ]
+    private static let coffeeURL = URL(string: "https://buymeacoffee.com/augustustranter")!
+    private static let aboutText = """
+        Hi, I'm Gus, a 24-year-old musician based in London, UK. I play the sax and piano, \
+        write and produce my own songs, and I'm always practising or listening to music: \
+        jazz, pop and pretty much everything else. I also love coding and maths, so I \
+        thought I'd make an app. If you enjoy it, you can buy me a coffee.
+        """
     private let presets = [30, 60, 72, 90, 120, 140, 180, 240]
     private let gridSpacing: CGFloat = 8
 
@@ -180,6 +189,7 @@ struct ContentView: View {
         .onChange(of: soundChoice) {
             applySound()
         }
+        .task(id: isSpeedingUp) { await speedUp() }
         // Opening a shared .metrosound file (from Messages, AirDrop, Files...).
         .onOpenURL { url in
             guard url.pathExtension == SharedSound.fileExtension else { return }
@@ -201,7 +211,10 @@ struct ContentView: View {
     // MARK: - Rows
 
     private func topRow(columnWidth: CGFloat, height: CGFloat, titleSize: CGFloat) -> some View {
-        HStack {
+        // The info button's slot: narrow, so the row still fits a small phone
+        // with the dancer and partner in the middle.
+        let infoWidth = titleSize * 2
+        return HStack(spacing: 0) {
             // Lit only when there's something to reset.
             tile("RESET", isOn: !isAtDefaults, action: resetAll)
                 .opacity(isAtDefaults ? 0.5 : 1)
@@ -209,7 +222,8 @@ struct ContentView: View {
                 .frame(width: columnWidth)
                 .wobbly("reset")
 
-            Spacer()
+            // The title and info button sit together, centred as one between RESET and the palette.
+            Spacer(minLength: 8)
 
             // While running, the title becomes a little metronome ticking in time.
             // Tapping the dancer changes its move instead of shaking everything.
@@ -234,7 +248,7 @@ struct ContentView: View {
                         MetronomeGlyph(metronome: metronome, palette: palette, clicksPerMinute: clicksPerMinute)
                             .frame(width: height * 0.9)
                     } else {
-                        CapText(text: "METRONOME APP", size: titleSize, tracking: 3)
+                        CapText(text: "METRONOME", size: titleSize, tracking: 3)
                             .foregroundStyle(palette.text)
                             .extraBold(palette.text, amount: 0.4)
                     }
@@ -243,7 +257,18 @@ struct ContentView: View {
             }
             .wobbly("title", fallsLast: true)
 
-            Spacer()
+            // Its own slot beside the title, so opening it never shakes anything.
+            PressButton(action: { isShowingAbout = true }) {
+                Image(systemName: "info.circle")
+                    .font(.system(size: titleSize * 1.3, weight: .semibold))
+                    .foregroundStyle(palette.text)
+                    // Flush right, so the slot's spare width is the gap after the title.
+                    .frame(width: infoWidth, height: height, alignment: .trailing)
+            }
+            .accessibilityLabel("About")
+            .wobbly("info")
+
+            Spacer(minLength: 8)
 
             PressButton(action: nextPalette) {
                 // Shows the current palette as four stripes.
@@ -498,7 +523,19 @@ struct ContentView: View {
     }
 
     @ViewBuilder private var popup: some View {
-        if let importProblem {
+        if isShowingAbout {
+            PopupCard(title: "ABOUT", subtitle: nil, palette: palette, onDismiss: { isShowingAbout = false }) {
+                Text(Self.aboutText)
+                    .font(.analogue(size: 17))
+                    .lineSpacing(4)
+                    .fixedSize(horizontal: false, vertical: true)
+                tile("BUY ME A COFFEE", isOn: true) {
+                    openURL(Self.coffeeURL)
+                    isShowingAbout = false
+                }
+                .frame(height: 48)
+            }
+        } else if let importProblem {
             PopupCard(
                 title: importProblem == .full ? "TOO MANY SOUNDS" : "CAN'T IMPORT THIS",
                 subtitle: importProblem == .full
@@ -633,6 +670,29 @@ struct ContentView: View {
             } catch {
                 print("Failed to start audio: \(error)")
             }
+        }
+    }
+
+    /// Whether the tempo should be creeping up: playing a sound like Tim Vine.
+    private var isSpeedingUp: Bool {
+        guard isRunning, case .builtIn(let sound) = soundChoice else { return false }
+        return sound.speedsUp
+    }
+
+    /// Speeds the tempo up smoothly, doubling it every minute, until stopped or 300 BPM.
+    /// Holds off while the tempo's being slid, so it doesn't fight the finger.
+    private func speedUp() async {
+        guard isSpeedingUp else { return }
+        let tick = 0.25
+        // Kept unrounded, so slow tempos still creep up between whole BPMs.
+        var exact = Double(tempo)
+        while true {
+            do { try await Task.sleep(for: .seconds(tick)) } catch { return }
+            // A tempo set by hand carries on doubling from there.
+            if Int(exact.rounded()) != tempo { exact = Double(tempo) }
+            guard !isSliding else { continue }
+            exact = min(exact * pow(2, tick / 60), Double(tempoRange.upperBound))
+            tempo = Int(exact.rounded())
         }
     }
 

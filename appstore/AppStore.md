@@ -30,7 +30,7 @@ Choose **"No, we do not collect data from this app."** The app makes no network 
 
 ## Promotional text [170]
 
-One screen, no ads, no accounts. Set any tempo from 1 to 300 BPM, pick from thirteen click sounds, or record your own.
+One screen, no ads, no accounts. Set any tempo from 1 to 300 BPM, pick from fourteen click sounds, or record your own.
 
 ## Description [4000]
 
@@ -49,8 +49,8 @@ SET THE TEMPO YOUR WAY
 TIME SIGNATURES
 Any number of beats per bar, over 1, 2, 4, 8, 16, 32 or 64. The first beat of every bar is accented, and the click follows the note value, so 6/8 clicks eighth notes.
 
-THIRTEEN CLICK SOUNDS
-Classic, Wood, Woodblock, Jam Block, Agogo, Shaker, Electric, Clave, Marimba, Snap, Clap, Cowbell and Hi-hat, including real recorded percussion.
+FOURTEEN CLICK SOUNDS
+Classic, Wood, Woodblock, Jam Block, Agogo, Shaker, Electric, Clave, Marimba, Snap, Clap, Cowbell, Hi-hat and Tim Vine, including real recorded percussion. Tim Vine keeps speeding up, doubling its tempo every minute: a workout for your fingers.
 
 RECORD YOUR OWN
 Clap, click or shout "hey!" and use it as your click, with its own downbeat if you like. Keep up to ten, and share them with friends.
@@ -60,6 +60,12 @@ Mixes over music and video from other apps without stopping them, keeps going in
 
 MADE TO LOOK AT
 Eight colour palettes, a live metronome that swings in time with the click, and a layout made for iPhone and iPad, in portrait and landscape.
+
+## What's New in 1.1 [4000]
+
+• New sound: Tim Vine. It starts at your tempo and keeps speeding up, doubling every minute. Good luck keeping up.
+• New About page: tap the ⓘ next to the title to meet the person who made the app.
+• The title now simply reads METRONOME.
 
 ## Keywords [100]
 
@@ -74,6 +80,8 @@ bpm,tempo,beat,click,tap,rhythm,drum,practice,music,piano,guitar,band,timing,cou
 ## App Review notes
 
 No sign-in is needed. The microphone is used only to record a custom click sound: swipe the row of sounds to the end and tap +. The app makes no network requests.
+
+The About screen (the ⓘ next to the title) has an optional link that opens the developer's Buy Me a Coffee page in Safari. It's a voluntary tip that unlocks nothing in the app; every feature is free.
 
 ## Export compliance
 
